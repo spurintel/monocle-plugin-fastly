@@ -1,5 +1,6 @@
 /// <reference types="@fastly/js-compute" />
 
+// import { SecretStore } from "fastly:secret-store";
 import { includeBytes } from "fastly:experimental";
 
 import * as cookie from "cookie";
@@ -7,25 +8,14 @@ import * as cookie from "cookie";
 // This example uses Spur Monocle
 // To start using Monocle, you need to register at https://app.spur.us/monocle
 // and get an API key pair. The key pair consists of a site token and a secret api token used to decrypt the results.
-const SITE_TOKEN = "";
-const SECRET_API_TOKEN = "";
+// const secrets = new SecretStore('example-secrets-service-a')
+// const SITE_TOKEN = await secrets.get("SITE_TOKEN");
+// const API_TOKEN = await secrets.get("API_TOKEN");
+
+
+
 const PROTECTED_CONTENT =
   "<iframe src='https://developer.fastly.com/compute-welcome' style='border:0; position: absolute; top: 0; left: 0; width: 100%; height: 100%'></iframe>\n";
-// const CAPTCHA_FORM = `
-// <html>
-//   <head>
-//     <title>Monocle demo: Simple page</title>
-//     <script src="https://mcl.spur.us/d/mcl.js?tk=${SITE_TOKEN}" async defer></script>
-//   </head>
-//   <body>
-//     <form action="?captcha=true" method="POST">
-//     <div class="monocle"></div>
-//     <br/>
-//     <input type="submit" value="Submit">
-//     </form>
-//   </body>
-// </html>
-// `;
 
 // Convert byte field to string
 function bytesToString(bytes) {
@@ -55,19 +45,20 @@ function searchAndReplace(bytes, searchString, replaceString) {
 
 // load captcha page
 const CAPTCHA_FORM = searchAndReplace(includeBytes("./src/captcha_page.html"), "SITE_TOKEN", SITE_TOKEN);
+const DENIED = includeBytes("./src/denied.html");
+const SUCCESS = includeBytes("./src/success.html");
 
 async function handleCaptchaRequest(req) {
-  const body = await req.text();
-  console.log(body);
-  // Extract the user's response token from the POST body
-  // and verify it with the reCAPTCHA API.
+  const body = await req.json();
+  console.log(body)
+  // Send the bundle for decryption
   const captchaURL = `https://decrypt.mcl.spur.us/api/v1/assessment`;
   let headers = new Headers();
   headers.set("Content-Type", "text/plain; charset=utf-8");
-  headers.set("TOKEN", SECRET_API_TOKEN);
+  headers.set("TOKEN", API_TOKEN);
   const captchaReq = new Request(captchaURL, {
     method: 'POST',
-    body: body.data,
+    body: body.captchaData,
     headers
   });
   const cacheOverride = new CacheOverride("pass");
@@ -78,20 +69,22 @@ async function handleCaptchaRequest(req) {
     cacheOverride
   });
 
-  const result = await res.text();
+  const result = await res.json();
   console.log(result);
-  return result.success || false;
+  return false;
 }
 
 async function handleRequest(event) {
   let req = event.request;
   let url = new URL(req.url);
-  const isChallenge = url.searchParams.has("captcha");
+  const isChallenge = url.pathname.includes("/validate_captcha");
+  const isDenied = url.pathname.includes("/denied");
 
   console.log(url);
-  if (req.method === "POST" && isChallenge) {
+  if (req.method === "POST" ) {
     const isPass = await handleCaptchaRequest(req);
     if (isPass) {
+      console.log("PASSED")
       // It's a pass! Set a cookie, so that this user is not challenged again within an hour.
       // You would probably want to make this cookie harder to fake.
       // If isPass is false, fall through to the remainder of the function and redisplay the CAPTCHA form.
@@ -100,8 +93,14 @@ async function handleRequest(event) {
       headers.set("Cache-Control", "private, no-store");
       headers.set("Set-Cookie", "captchaAuth=1; path=/; max-age=3600");
       headers.set("Location", url);
-
-      return new Response("", { status: 302, headers });
+      return new Response(SUCCESS, { status: 302, headers });
+    } else {
+      let headers = new Headers();
+      headers.set("Cache-Control", "private, no-store");
+      headers.set("Set-Cookie", "captchaAuth=0; path=/; max-age=3600");
+      headers.set("Location", url);
+      console.log("DENIED")
+      return new Response(DENIED, { status: 403, headers });
     }
   }
 
@@ -112,7 +111,7 @@ async function handleRequest(event) {
   if (req.headers.has("Cookie")) {
     const cookies = cookie.parse(req.headers.get("Cookie"));
     if (cookies.captchaAuth === "1") {
-      body = PROTECTED_CONTENT;
+      body = SUCCESS;
     }
   }
   return new Response(body, { status: 200, headers });
