@@ -1,0 +1,26 @@
+# This file describes a Fastly Compute package. To learn more visit:
+# https://www.fastly.com/documentation/reference/compute/fastly-toml
+
+authors = ["jack@spur.us"]
+cloned_from = "https://fiddle.fastly.dev/fiddle/39e3c1b6"
+description = "Monocle"
+language = "javascript"
+manifest_version = 2
+name = "monocle-example-fastly-compute-2"
+service_id = ""
+
+[local_server]
+
+  [local_server.backends]
+
+    [local_server.backends.mcl_assessment]
+      override_host = "decrypt.mcl.spur.us"
+      url = "https://decrypt.mcl.spur.us"
+
+[setup]
+
+  [setup.backends]
+
+    [setup.backends.mcl_assessment]
+      address = "decrypt.mcl.spur.us"
+      port = 443
