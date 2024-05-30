@@ -13,7 +13,6 @@ import * as cookie from "cookie";
 // const API_TOKEN = await secrets.get("API_TOKEN");
 
 
-
 const PROTECTED_CONTENT =
   "<iframe src='https://developer.fastly.com/compute-welcome' style='border:0; position: absolute; top: 0; left: 0; width: 100%; height: 100%'></iframe>\n";
 
@@ -43,7 +42,9 @@ function searchAndReplace(bytes, searchString, replaceString) {
   return stringToBytes(str);
 }
 
-// load captcha page
+// Load html response pages as bytes at compile time
+// Is this weird?  Yes!  Fastly doesn't expose the filesystem at runtime.
+// You can also load html inline like PROTECTED_CONTENT above.
 const CAPTCHA_FORM = searchAndReplace(includeBytes("./src/captcha_page.html"), "SITE_TOKEN", SITE_TOKEN);
 const DENIED = includeBytes("./src/denied.html");
 const SUCCESS = includeBytes("./src/success.html");
@@ -70,52 +71,61 @@ async function handleCaptchaRequest(req) {
   });
 
   const result = await res.json();
-  console.log(result);
-  return false;
+  console.log("isanon " + result.anon)
+  // return true if you want the captcha to pass
+  // return false if you want the captcha to fail
+  // Simply returning false for any anonymous connections for now 
+  if ( result.anon ) {
+    return false;
+  } else {
+    return true;
+  }
 }
 
 async function handleRequest(event) {
   let req = event.request;
   let url = new URL(req.url);
+  console.log(url);
   const isChallenge = url.pathname.includes("/validate_captcha");
   const isDenied = url.pathname.includes("/denied");
 
-  console.log(url);
-  if (req.method === "POST" ) {
+  let headers = new Headers();
+  headers.set("Content-Type", "text/html; charset=utf-8");
+  headers.set("Cache-Control", "private, no-store");
+  headers.set("Location", url);
+
+  if (req.method === "POST" && isChallenge ) {
     const isPass = await handleCaptchaRequest(req);
     if (isPass) {
       console.log("PASSED")
       // It's a pass! Set a cookie, so that this user is not challenged again within an hour.
       // You would probably want to make this cookie harder to fake.
-      // If isPass is false, fall through to the remainder of the function and redisplay the CAPTCHA form.
-      url.searchParams.delete("captcha");
-      let headers = new Headers();
-      headers.set("Cache-Control", "private, no-store");
+      headers.set("Location", url);
       headers.set("Set-Cookie", "captchaAuth=1; path=/; max-age=3600");
-      headers.set("Location", url);
-      return new Response(SUCCESS, { status: 302, headers });
+      return new Response("", { status: 302, headers });
     } else {
-      let headers = new Headers();
-      headers.set("Cache-Control", "private, no-store");
-      headers.set("Set-Cookie", "captchaAuth=0; path=/; max-age=3600");
-      headers.set("Location", url);
       console.log("DENIED")
-      return new Response(DENIED, { status: 403, headers });
+      headers.set("Location", "/denied");
+      headers.set("Set-Cookie", "captchaAuth=0; path=/; max-age=0");
+      return new Response("", { status: 302, headers });
     }
-  }
-
-  let headers = new Headers();
-  headers.set("Content-Type", "text/html; charset=utf-8");
-
-  let body = CAPTCHA_FORM;
-  if (req.headers.has("Cookie")) {
-    const cookies = cookie.parse(req.headers.get("Cookie"));
-    if (cookies.captchaAuth === "1") {
-      body = SUCCESS;
+  } else if ( req.method === "GET" && isDenied ) {
+    console.log("IS DENIED")
+    let body = searchAndReplace(DENIED, "REPLACE_ME", "SOME VPN OR PROXY");
+    return new Response(body, { status: 200, headers });
+  } else {
+    console.log("CAPTCHA OR PASS")
+    let body = CAPTCHA_FORM;
+    if (req.headers.has("Cookie")) {
+      console.log("HAS COOKIE")
+      const cookies = cookie.parse(req.headers.get("Cookie"));
+      if (cookies.captchaAuth === "1") {
+        console.log("HAS CAPTCHA AUTH")
+        body = SUCCESS;
+      }
     }
+    return new Response(body, { status: 200, headers });
   }
-  return new Response(body, { status: 200, headers });
-
 }
 
 addEventListener("fetch", (event) => event.respondWith(handleRequest(event)));
