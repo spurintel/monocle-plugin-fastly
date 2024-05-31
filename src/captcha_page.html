@@ -193,18 +193,18 @@
                 },
                 body: JSON.stringify({ captchaData: data }),
             })
-                // .then(response => {
-                //     if (response.ok) {
-                //         var urlParams = new URLSearchParams(window.location.search);
-                //         var uri = urlParams.get('uri');
-                //         window.location.href = uri; // Redirect to the home page on success
-                //     } else {
-                //         response.json().then((data) => {
-                //             window.location.href = `/denied?service=${data && data.service ? data.service : ""}`;
-                //             connectionStatus.className = 'loading-no-animation'
-                //         });
-                //     }
-                // })
+                .then(response => {
+                    if (response.ok) {
+                        var urlParams = new URLSearchParams(window.location.search);
+                        var uri = urlParams.get('uri');
+                        window.location.href = uri; // Redirect to the home page on success
+                    } else {
+                        response.json().then((data) => {
+                            window.location.href = `/denied?service=${data && data.service ? data.service : ""}`;
+                            connectionStatus.className = 'loading-no-animation'
+                        });
+                    }
+                })
                 .catch(error => {
                     console.error('Error during captcha validation:', error);
                     alert('An error occurred. Please try again.');

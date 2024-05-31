@@ -12,6 +12,9 @@ import * as cookie from "cookie";
 // const SITE_TOKEN = await secrets.get("SITE_TOKEN");
 // const API_TOKEN = await secrets.get("API_TOKEN");
 
+const SITE_TOKEN = "";
+const API_TOKEN = "";
+
 
 const PROTECTED_CONTENT =
   "<iframe src='https://developer.fastly.com/compute-welcome' style='border:0; position: absolute; top: 0; left: 0; width: 100%; height: 100%'></iframe>\n";
@@ -51,7 +54,6 @@ const SUCCESS = includeBytes("./src/success.html");
 
 async function handleCaptchaRequest(req) {
   const body = await req.json();
-  console.log(body)
   // Send the bundle for decryption
   const captchaURL = `https://decrypt.mcl.spur.us/api/v1/assessment`;
   let headers = new Headers();
@@ -71,12 +73,11 @@ async function handleCaptchaRequest(req) {
   });
 
   const result = await res.json();
-  console.log("isanon " + result.anon)
   // return true if you want the captcha to pass
   // return false if you want the captcha to fail
   // Simply returning false for any anonymous connections for now 
   if ( result.anon ) {
-    return false;
+    return new Response(JSON.stringify(result), { status: 403, headers });
   } else {
     return true;
   }
@@ -87,7 +88,12 @@ async function handleRequest(event) {
   let url = new URL(req.url);
   console.log(url);
   const isChallenge = url.pathname.includes("/validate_captcha");
+  const isCaptcha = url.pathname.includes("/captcha_page.html");
   const isDenied = url.pathname.includes("/denied");
+
+  if (isDenied) {
+    console.log("DENIED");
+  }
 
   let headers = new Headers();
   headers.set("Content-Type", "text/html; charset=utf-8");
@@ -96,36 +102,39 @@ async function handleRequest(event) {
 
   if (req.method === "POST" && isChallenge ) {
     const isPass = await handleCaptchaRequest(req);
-    if (isPass) {
-      console.log("PASSED")
-      // It's a pass! Set a cookie, so that this user is not challenged again within an hour.
-      // You would probably want to make this cookie harder to fake.
-      headers.set("Location", url);
+    if (isPass == true) {
       headers.set("Set-Cookie", "captchaAuth=1; path=/; max-age=3600");
-      return new Response("", { status: 302, headers });
-    } else {
-      console.log("DENIED")
-      headers.set("Location", "/denied");
-      headers.set("Set-Cookie", "captchaAuth=0; path=/; max-age=0");
-      return new Response("", { status: 302, headers });
+      return new Response("Captcha validated successfully", { status: 200, headers });
+    } 
+    else {
+      return new Response(JSON.stringify(isPass), { status: 403, headers });
     }
-  } else if ( req.method === "GET" && isDenied ) {
-    console.log("IS DENIED")
-    let body = searchAndReplace(DENIED, "REPLACE_ME", "SOME VPN OR PROXY");
-    return new Response(body, { status: 200, headers });
-  } else {
-    console.log("CAPTCHA OR PASS")
+  } else if (req.method === "GET" && isCaptcha ) {
     let body = CAPTCHA_FORM;
-    if (req.headers.has("Cookie")) {
-      console.log("HAS COOKIE")
-      const cookies = cookie.parse(req.headers.get("Cookie"));
-      if (cookies.captchaAuth === "1") {
-        console.log("HAS CAPTCHA AUTH")
-        body = SUCCESS;
-      }
+    return new Response(body, { status: 200, headers });
+  } else if (req.method === "GET" && isDenied ) {
+    let basicText = 'any VPNs or proxies and try again';
+    const url = new URL(req.url);
+    const paramValue = url.searchParams.get('service');
+    if (paramValue && paramValue !== "") {
+      basicText = paramValue;
+    }
+    let body = searchAndReplace(DENIED, "REPLACE_ME", basicText);
+    return new Response(body, { status: 200, headers });
+  }
+
+  let body = CAPTCHA_FORM;
+  if (req.headers.has("Cookie")) {
+    console.log("HAS COOKIE");
+    const cookies = cookie.parse(req.headers.get("Cookie"));
+    if (cookies.captchaAuth === "1") {
+      console.log("HAS CAPTCHA AUTH");
+      body = SUCCESS;
     }
     return new Response(body, { status: 200, headers });
   }
+
+  return Response.redirect(`${url.protocol}//${url.host}/captcha_page.html?uri=${url.pathname}`, 302)
 }
 
 addEventListener("fetch", (event) => event.respondWith(handleRequest(event)));
