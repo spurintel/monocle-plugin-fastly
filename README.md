@@ -28,5 +28,13 @@ support@spur.us
 1. Sign up for a [Fastly account](https://fastly.com/).
 2. Sign up for a [Spur account](https://spur.us/).
 3. Install the [Fastly CLI client](https://developer.fastly.com/reference/cli).
-4. Create a new [Fastly compute service](https://manage.fastly.com/compute).
+4. Get your tokens from the [Monocle management](https://app.spur.us/monocle) page and set them in `src/index.js`.  
+    ```
+    const SITE_TOKEN = "YOURSITETOKENHERE";
+    const API_TOKEN = "YOURAPITOKENHERE";
+    ```
+5. Create a new [Fastly compute service](https://manage.fastly.com/compute).  
     The "Create service" button will guide you through setting up a new service
+
+
+You should use the [Fastly secret store](https://www.fastly.com/documentation/reference/api/services/resources/secret-store/) for at least the API token.  An example using the secret store is included but commented out because it requires additional Fastly account setup.
