@@ -13,6 +13,11 @@ export const POLICY_BACKEND = 'monocle_policy';
 export const CONFIG_STORE_NAME = 'monocle_config';
 export const SECRET_STORE_NAME = 'monocle_secrets';
 
+// Named log endpoint for raw assessment lines (LOG_ASSESSMENT="true"). The
+// customer creates it on the service themselves to get retained/streamed logs;
+// it is OPTIONAL and usually absent, so every write to it is best-effort.
+export const ASSESSMENT_LOG_ENDPOINT = 'monocle_assessments';
+
 // Host for the Monocle Policy API. Note the `decrypt.` prefix: the backend
 // SDK targets `https://decrypt.<baseDomain>/api/v1/policy`.
 export const POLICY_API_URL = 'https://decrypt.mcl.spur.us/api/v1/policy';

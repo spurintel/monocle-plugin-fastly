@@ -47,6 +47,14 @@ export interface MonocleConfig {
 	 * routes "/*") means every path on every domain is protected.
 	 */
 	protectedPaths?: Record<string, string[]>;
+	/**
+	 * When true, each verify (challenge solve) logs one JSON line with the raw
+	 * policy decision: always to console (visible in the live log tail with no
+	 * setup) and best-effort to the optional `monocle_assessments` named log
+	 * endpoint. Default OFF; true only when the Config Store key is exactly
+	 * "true", and dashboard-toggled via the Config Store (no redeploy needed).
+	 */
+	logAssessment: boolean;
 	blockResponseType?: 'redirect' | 'html';
 	blockRedirectUrl?: string;
 	/** Parsed and clamped to a 4xx/5xx code here; the block builder defaults to 403. */
@@ -109,6 +117,7 @@ export function loadConfig(): MonocleConfig {
 		chainSecret: optional(config, 'CHAIN_SECRET'),
 		cacheRules: parseCacheRules(optional(config, 'CACHE_RULES')),
 		protectedPaths: parseProtectedPaths(optional(config, 'PROTECTED_PATHS')),
+		logAssessment: optional(config, 'LOG_ASSESSMENT') === 'true',
 		blockResponseType: parseBlockType(optional(config, 'BLOCK_RESPONSE_TYPE')),
 		blockRedirectUrl: optional(config, 'BLOCK_REDIRECT_URL'),
 		blockStatusCode: parseBlockStatus(optional(config, 'BLOCK_STATUS_CODE')),
