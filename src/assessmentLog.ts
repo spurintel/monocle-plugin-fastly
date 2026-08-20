@@ -23,6 +23,9 @@ export function logAssessment(
 	captchaLen?: number
 ): void {
 	if (config.logAssessment !== true) return;
+	// The policy API omits the assessment when the plan lacks the logging
+	// entitlement, and a log line with no assessment in it is just noise.
+	if (decision.assessment == null) return;
 	try {
 		const line = JSON.stringify({
 			monocle: 'assessment',

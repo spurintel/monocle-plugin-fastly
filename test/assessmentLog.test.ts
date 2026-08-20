@@ -22,7 +22,8 @@ vi.mock('fastly:logger', () => ({
 	},
 }));
 
-const decision: MonoclePolicyDecision = { allowed: false, reason: 'bot-detected' };
+const assessment = { vpn: false, anon: false, cc: 'US', id: 'test-assessment-id' };
+const decision: MonoclePolicyDecision = { allowed: false, reason: 'bot-detected', assessment };
 
 function configWith(logAssessmentFlag: boolean): MonocleConfig {
 	return { logAssessment: logAssessmentFlag } as MonocleConfig;
@@ -67,7 +68,18 @@ describe('logAssessment', () => {
 			captchaLen: 42,
 			allowed: false,
 			reason: 'bot-detected',
+			assessment,
 		});
+	});
+
+	it('logs nothing when the policy API withholds the assessment', () => {
+		// An org without the logging entitlement gets a decision with no
+		// assessment, so there is nothing worth writing a line about.
+		logAssessment(configWith(true), { allowed: true, reason: 'ok' }, 42);
+
+		expect(consoleLog).not.toHaveBeenCalled();
+		expect(h.ctor).not.toHaveBeenCalled();
+		expect(h.logFn).not.toHaveBeenCalled();
 	});
 
 	it('omits captchaLen when not provided', () => {
