@@ -87,7 +87,7 @@ export async function validateCookie(
 		const key = await importHmacKey(await config.getCookieSecret());
 		valid = await crypto.subtle.verify('HMAC', key, hexToBuf(signatureHex), payloadBytes);
 	} catch (error) {
-		console.log(`Error verifying cookie signature: ${error}`);
+		console.error(`Error verifying cookie signature: ${error}`);
 		return false;
 	}
 	if (!valid) {
@@ -100,12 +100,14 @@ export async function validateCookie(
 	// client IP was available at issue time); skip the comparison rather than
 	// failing a cookie that could never match anything.
 	if (clientIpAddress !== '' && clientIp !== clientIpAddress) {
-		console.log(`Mismatch IP address. Expecting ${clientIpAddress}, Got ${clientIp}`);
+		// Deliberately does not log either IP: this fires routinely (mobile/CGNAT
+		// clients rotate IPs mid-session) and visitor IPs do not belong in logs.
+		console.error('Cookie client IP mismatch; re-challenging.');
 		return false;
 	}
 
 	if (Math.floor(Date.now() / 1000) >= parseInt(expiryTime ?? '0', 10)) {
-		console.log('Cookie has expired.');
+		console.error('Cookie has expired.');
 		return false;
 	}
 

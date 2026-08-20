@@ -12,6 +12,30 @@ describe('parseCacheRules', () => {
 		expect(parseCacheRules('[{"ttl":60},{"prefix":"/api"}]')).toEqual([{ prefix: '/api' }]);
 	});
 
+	it('strips a string ttl but keeps the rule (a bad ttl must never reach CacheOverride)', () => {
+		expect(parseCacheRules('[{"prefix":"/","ttl":"60"}]')).toEqual([{ prefix: '/' }]);
+	});
+
+	it('strips negative and non-finite ttl/swr values', () => {
+		expect(parseCacheRules('[{"prefix":"/","ttl":-1,"swr":-0.5}]')).toEqual([{ prefix: '/' }]);
+		// JSON.parse turns 1e999 into Infinity; NaN cannot appear in valid JSON,
+		// so a literal NaN fails the parse and yields no rules.
+		expect(parseCacheRules('[{"prefix":"/","ttl":1e999}]')).toEqual([{ prefix: '/' }]);
+		expect(parseCacheRules('[{"prefix":"/","ttl":NaN}]')).toEqual([]);
+	});
+
+	it('strips a non-string or empty surrogateKey but keeps the rule', () => {
+		expect(parseCacheRules('[{"prefix":"/","surrogateKey":42}]')).toEqual([{ prefix: '/' }]);
+		expect(parseCacheRules('[{"prefix":"/","surrogateKey":""}]')).toEqual([{ prefix: '/' }]);
+	});
+
+	it('keeps a valid rule alongside an invalid one', () => {
+		expect(parseCacheRules('[{"prefix":"/api","ttl":"bad"},{"prefix":"/img","ttl":300}]')).toEqual([
+			{ prefix: '/api' },
+			{ prefix: '/img', ttl: 300 },
+		]);
+	});
+
 	it('yields no rules for missing/invalid JSON or a non-array (never throws)', () => {
 		expect(parseCacheRules(undefined)).toEqual([]);
 		expect(parseCacheRules('')).toEqual([]);
