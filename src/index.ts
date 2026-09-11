@@ -1,6 +1,7 @@
 /// <reference types="@fastly/js-compute" />
 import { CacheOverride } from 'fastly:cache-override';
 import { buildChainAuthHeader } from './chainAuth';
+import { setClientIpHeaders } from './clientIp';
 import { CHAIN_AUTH_HEADER, CHAIN_SECRET_HEADER, ORIGIN_BACKEND, POLICY_BACKEND } from './constants';
 import { loadConfig, type CacheRule, type MonocleConfig } from './config';
 import { validateCookie, setSecureCookie } from './cookies';
@@ -127,21 +128,15 @@ async function proxyToOrigin(
 		const originRequest = new Request(url.toString(), request);
 		if (config.originHost) originRequest.headers.set('host', config.originHost);
 
-		// OVERWRITE X-Forwarded-For, never append: Monocle is the edge trust
-		// boundary, so inbound XFF is client-supplied and propagating it would let
-		// a visitor spoof its IP past downstream rate limiting. When chaining, the
-		// next Fastly hop re-stamps Fastly-Client-IP at its own ingress, so XFF's
-		// leftmost entry is what survives; Fastly-Client-IP mainly serves a
-		// non-Fastly origin in simple mode.
-		if (clientIp) {
-			originRequest.headers.set('X-Forwarded-For', clientIp);
-			originRequest.headers.set('Fastly-Client-IP', clientIp);
-		} else {
-			// No real client IP to assert. Still strip any inbound values so a
-			// client-supplied XFF/Fastly-Client-IP can never reach the origin.
-			originRequest.headers.delete('X-Forwarded-For');
-			originRequest.headers.delete('Fastly-Client-IP');
-		}
+		// OVERWRITE the client-IP headers, never append: Monocle is the edge trust
+		// boundary, so inbound values are client-supplied and propagating them
+		// would let a visitor spoof its IP past downstream rate limiting (or, via
+		// the configured custom header, to an origin like Salesforce Commerce
+		// Cloud that trusts it). When chaining, the next Fastly hop re-stamps
+		// Fastly-Client-IP at its own ingress, so XFF's leftmost entry is what
+		// survives; Fastly-Client-IP mainly serves a non-Fastly origin in simple
+		// mode. With no client IP to assert, the headers are stripped instead.
+		setClientIpHeaders(originRequest.headers, clientIp, config.clientIpHeader);
 
 		// Chaining headers are Monocle's to assert, never the client's: strip any
 		// inbound value (including the legacy static-secret header), then set the

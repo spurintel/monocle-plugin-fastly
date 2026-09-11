@@ -53,6 +53,13 @@ export interface MonocleConfig {
 	blockStatusCode?: number;
 	blockPageTitle?: string;
 	blockResponseBody?: string;
+	/**
+	 * Optional custom header name the origin reads the visitor IP from (e.g.
+	 * Salesforce Commerce Cloud's Client IP Header Name, which rejects the
+	 * standard headers). Overwritten on every origin request, never passed
+	 * through; see setClientIpHeaders.
+	 */
+	clientIpHeader?: string;
 }
 
 function optional(store: ConfigStore, key: string): string | undefined {
@@ -114,6 +121,7 @@ export function loadConfig(): MonocleConfig {
 		blockStatusCode: parseBlockStatus(optional(config, 'BLOCK_STATUS_CODE')),
 		blockPageTitle: optional(config, 'BLOCK_PAGE_TITLE'),
 		blockResponseBody: optional(config, 'BLOCK_RESPONSE_BODY'),
+		clientIpHeader: optional(config, 'CLIENT_IP_HEADER'),
 		getSecretKey: () => (secretKey ??= secret(secrets, 'SECRET_KEY')),
 		getCookieSecret: () => (cookieSecret ??= secret(secrets, 'COOKIE_SECRET_VALUE')),
 	};
