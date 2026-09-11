@@ -1,5 +1,6 @@
 /// <reference types="@fastly/js-compute" />
 import { CacheOverride } from 'fastly:cache-override';
+import { logAssessment } from './assessmentLog';
 import { buildChainAuthHeader } from './chainAuth';
 import { CHAIN_AUTH_HEADER, CHAIN_SECRET_HEADER, ORIGIN_BACKEND, POLICY_BACKEND } from './constants';
 import { loadConfig, type CacheRule, type MonocleConfig } from './config';
@@ -190,6 +191,11 @@ async function validateWithPolicyApi(
 			await config.getSecretKey(),
 			POLICY_BACKEND
 		);
+
+		// Before the allow/deny branch so both outcomes are captured. NOT called
+		// on the fail-open catch paths below: no decision exists there. The helper
+		// is a no-op unless LOG_ASSESSMENT is enabled and can never throw.
+		logAssessment(config, policyDecision, body.captchaData.length);
 
 		if (!policyDecision.allowed) {
 			return config.blockResponseType
