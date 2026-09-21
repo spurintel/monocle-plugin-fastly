@@ -3,36 +3,39 @@
 manifest_version = 3
 name = "monocle-plugin-fastly"
 language = "javascript"
-description = "Monocle edge assessment + policy blocking for Fastly Compute"
+description = "Monocle edge assessment and enforcement for Fastly Compute (edge contract 2)"
 authors = ["engineering@spur.us"]
 
 [scripts]
   build = "npm run build"
 
-# Local-server (Viceroy) configuration used by `fastly compute serve` to
-# simulate the Fastly platform for the PoC. Production values are provisioned
-# by the web app via the Fastly API (backends + resource-linked stores).
+# Viceroy configuration for `fastly compute serve`. Production values are provisioned by the
+# dashboard through the Fastly API: the backends, and the stores as resource links.
 [local_server]
   [local_server.backends]
     [local_server.backends.origin]
-      # Stand-in origin for local testing. In production this targets the
-      # customer's existing Fastly service / origin.
       url = "https://example.com"
-      # Local-only: rewrite the loopback Host to the test origin's host. In
-      # production the inbound request already carries the customer's domain.
       override_host = "example.com"
     [local_server.backends.monocle_policy]
-      # The Monocle Policy API host (note the `decrypt.` prefix).
       url = "https://decrypt.mcl.spur.us"
+    [local_server.backends.crawler_developers_google_com]
+      url = "https://developers.google.com"
+    [local_server.backends.crawler_www_bing_com]
+      url = "https://www.bing.com"
 
   [local_server.config_stores]
     [local_server.config_stores.monocle_config]
       format = "inline-toml"
     [local_server.config_stores.monocle_config.contents]
+      v = "2"
+      id = "local-deployment"
+      cv = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      cfgn = "1"
+      "cfg.0" = '{"hosts":["example.com"],"assess":["/*"]}'
+      enfn = "1"
+      "enf.0" = '{"v":1,"p":{"/api/cart/add":1},"s":{"/members":1}}'
+      x = '["/static/*"]'
       PUBLISHABLE_KEY = "test_publishable_key"
-      # BLOCK_RESPONSE_TYPE = "html"
-      # BLOCK_PAGE_TITLE = "Access Denied"
-      # BLOCK_RESPONSE_BODY = "This request has been blocked"
 
   [local_server.secret_stores]
     [[local_server.secret_stores.monocle_secrets]]

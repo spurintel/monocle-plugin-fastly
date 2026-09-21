@@ -1,0 +1,50 @@
+import { cacheOverrideFor } from './cacheRules';
+import { buildChainAuthHeader } from './chainAuth';
+import type { OriginSettings } from './config';
+import { CHAIN_AUTH_HEADER, CHAIN_SECRET_HEADER, ORIGIN_BACKEND } from './constants';
+
+/**
+ * Proxies to the customer's origin. The inbound Host names this service, so a host-routing
+ * origin would send the request straight back; `host` rewrites it. The client address is
+ * asserted, never forwarded: Compute adds no client-IP headers of its own, and an inbound
+ * value is the visitor's to forge. A chained service gets a time-limited signature so it can
+ * refuse anything that did not come through here.
+ */
+export async function fetchOrigin(
+	request: Request,
+	settings: OriginSettings,
+	clientIp: string | null
+): Promise<Response> {
+	const url = new URL(request.url);
+	if (settings.host) url.hostname = settings.host;
+	// Rebuilt from parts: the headers become mutable, and the body streams through.
+	const outbound = new Request(url.toString(), {
+		method: request.method,
+		headers: request.headers,
+		body: request.method === 'GET' || request.method === 'HEAD' ? null : request.body,
+		duplex: 'half',
+	} as RequestInit);
+	if (settings.host) outbound.headers.set('host', settings.host);
+	stampClientIp(outbound.headers, clientIp, settings.clientIpHeader);
+	outbound.headers.delete(CHAIN_SECRET_HEADER);
+	outbound.headers.delete(CHAIN_AUTH_HEADER);
+	if (settings.chainSecret)
+		outbound.headers.set(CHAIN_AUTH_HEADER, await buildChainAuthHeader(settings.chainSecret));
+	const cacheOverride = cacheOverrideFor(url.pathname, settings.cacheRules);
+	try {
+		return await fetch(outbound, { backend: ORIGIN_BACKEND, ...(cacheOverride && { cacheOverride }) });
+	} catch (error) {
+		console.error(
+			`Origin proxy failed: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`
+		);
+		return new Response('Bad Gateway', { status: 502 });
+	}
+}
+
+/** Overwrites, never appends: the inbound values are client-supplied. */
+export function stampClientIp(headers: Headers, clientIp: string | null, customHeader?: string): void {
+	for (const name of ['X-Forwarded-For', 'Fastly-Client-IP', ...(customHeader ? [customHeader] : [])]) {
+		if (clientIp) headers.set(name, clientIp);
+		else headers.delete(name);
+	}
+}

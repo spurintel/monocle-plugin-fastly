@@ -1,120 +1,131 @@
+/** The deployment as the dashboard published it to the Config Store and the Secret Store. */
+
 import { ConfigStore } from 'fastly:config-store';
 import { SecretStore } from 'fastly:secret-store';
+import {
+	compileConfig,
+	compileExclusions,
+	parseRouteIndex,
+	type CompiledConfig,
+	type DeploymentConfig,
+	type Exclusion,
+	type RouteIndex,
+} from '@spur.us/monocle-edge-core';
+
+import { parseCacheRules, type CacheRule } from './cacheRules';
 import { CONFIG_STORE_NAME, SECRET_STORE_NAME } from './constants';
-import { parseCacheRules, parseProtectedPaths, type CacheRule } from './configParse';
 
-export type { CacheRule };
-
-/**
- * Runtime configuration for the plugin, assembled from the Config Store
- * (non-secret) and the Secret Store (secret material). Mirrors the `Env`
- * bindings the Cloudflare worker receives so the request-handling logic can be
- * ported one-to-one.
- */
-export interface MonocleConfig {
-	publishableKey: string;
-	/**
-	 * Secret material is loaded LAZILY and memoized: most requests (unprotected
-	 * paths, block-page passthrough) never need either secret, and cookie
-	 * validation needs only the cookie secret. Keeping these behind async getters
-	 * removes the Secret Store reads from the proxy hot path entirely.
-	 */
-	getSecretKey(): Promise<string>;
-	getCookieSecret(): Promise<string>;
-	/**
-	 * Host to send to the customer's origin. Fastly's backend `override_host` is
-	 * not honoured when we replay the inbound request, so the plugin rewrites the
-	 * outbound Host to this value. Undefined (empty in the store) means "forward
-	 * the visitor's Host unchanged".
-	 */
-	originHost?: string;
-	/**
-	 * Shared secret sent to the customer's existing service when chaining. Lets
-	 * that service reject direct hits to the internal host that would otherwise
-	 * bypass the Monocle challenge. Undefined when not chaining.
-	 */
+/** What reaching the customer's origin needs. Read best-effort: a request is forwarded even when it cannot be protected. */
+export interface OriginSettings {
+	/** Host to send the origin; undefined forwards the visitor's own. */
+	host?: string;
+	/** Shared secret of the chained service, when chaining. */
 	chainSecret?: string;
-	/**
-	 * Optional path-prefix cache rules cloned from the customer's source service.
-	 * Empty/absent means "use the default readthrough cache" (honour the origin's
-	 * own cache headers), which is the normal case.
-	 */
 	cacheRules: CacheRule[];
-	/**
-	 * Optional path scoping per protected hostname (lowercase host → path
-	 * patterns like "/api/*"). Requests outside the patterns bypass the Monocle
-	 * challenge and proxy straight to the origin. Absent (the common case, all
-	 * routes "/*") means every path on every domain is protected.
-	 */
-	protectedPaths?: Record<string, string[]>;
-	blockResponseType?: 'redirect' | 'html';
-	blockRedirectUrl?: string;
-	/** Parsed and clamped to a 4xx/5xx code here; the block builder defaults to 403. */
-	blockStatusCode?: number;
-	blockPageTitle?: string;
-	blockResponseBody?: string;
+	/** One more header the client address is stamped into, for an origin that reads its own. */
+	clientIpHeader?: string;
 }
 
-function optional(store: ConfigStore, key: string): string | undefined {
+/** What the shared pipeline runs on. */
+export interface Protection {
+	config: CompiledConfig;
+	deploymentId: string;
+	clearanceVersion: string;
+	publishableKey: string;
+	exclusions: Exclusion[];
+	/** Enforcement as the dashboard published it: lookups, never patterns compiled here. */
+	routeIndex: RouteIndex;
+}
+
+/** Secret Store reads, each made once and only when a request needs it. */
+export interface Secrets {
+	secretKey(): Promise<string>;
+	cookieSecret(): Promise<string>;
+}
+
+export class ConfigUnavailable extends Error {}
+
+const MAX_CHUNKS = 500;
+const CLEARANCE_VERSION = /^[a-f0-9]{64}$/;
+const HEADER_NAME = /^[A-Za-z0-9-]{1,64}$/;
+
+function item(store: ConfigStore, key: string): string | undefined {
 	const value = store.get(key);
 	return value === null || value === '' ? undefined : value;
 }
 
-function parseBlockType(raw: string | undefined): 'redirect' | 'html' | undefined {
-	return raw === 'redirect' || raw === 'html' ? raw : undefined;
+export function loadOriginSettings(store = new ConfigStore(CONFIG_STORE_NAME)): OriginSettings {
+	const header = item(store, 'CLIENT_IP_HEADER');
+	return {
+		host: item(store, 'ORIGIN_HOST'),
+		chainSecret: item(store, 'CHAIN_SECRET'),
+		cacheRules: parseCacheRules(item(store, 'CACHE_RULES')),
+		clientIpHeader: header && HEADER_NAME.test(header) ? header : undefined,
+	};
 }
 
-/**
- * Clamps the block status to a 4xx/5xx error code, returning undefined (so the
- * builder falls back to 403) otherwise. Doing it here means an out-of-range
- * value can never reach `new Response` and throw the block path into the verify
- * catch's fail-open. A 2xx is rejected too: the interstitial treats an `ok`
- * response as success and reloads, looping instead of showing the block page.
- */
-function parseBlockStatus(raw: string | undefined): number | undefined {
-	if (raw === undefined) return undefined;
-	const n = parseInt(raw, 10);
-	return n >= 400 && n <= 599 ? n : undefined;
-}
+/** Throws `ConfigUnavailable` on anything short of a complete, valid deployment. */
+export function loadProtection(store = new ConfigStore(CONFIG_STORE_NAME)): Protection {
+	if (item(store, 'v') !== '2') throw new ConfigUnavailable('edge contract version');
+	const deploymentId = item(store, 'id');
+	const clearanceVersion = item(store, 'cv');
+	const publishableKey = item(store, 'PUBLISHABLE_KEY');
+	if (!deploymentId || !clearanceVersion || !CLEARANCE_VERSION.test(clearanceVersion) || !publishableKey)
+		throw new ConfigUnavailable('deployment keys');
 
-async function secret(store: SecretStore, key: string): Promise<string> {
-	const entry = await store.get(key);
-	return entry ? entry.plaintext() : '';
-}
-
-/**
- * Loads config at request time. Config/Secret stores can only be accessed while
- * handling a request (not during build-time init), so this is called inside the
- * fetch handler. Secrets are NOT read here: the getters fetch each secret on
- * first use and memoize the promise, so requests that never touch secret
- * material never pay the Secret Store roundtrips.
- */
-export function loadConfig(): MonocleConfig {
-	const config = new ConfigStore(CONFIG_STORE_NAME);
-	const secrets = new SecretStore(SECRET_STORE_NAME);
-
-	const publishableKey = config.get('PUBLISHABLE_KEY') ?? '';
-	if (!publishableKey) {
-		// Without this the challenge page renders with an empty token and can never
-		// complete: an invisible install failure worth a loud log.
-		console.error('PUBLISHABLE_KEY is missing from the config store; the challenge page cannot work.');
+	let raw: DeploymentConfig;
+	try {
+		raw = JSON.parse(chunked(store, 'cfg')) as DeploymentConfig;
+	} catch {
+		throw new ConfigUnavailable('config JSON');
 	}
+	let config: CompiledConfig;
+	try {
+		config = compileConfig(raw);
+	} catch (error) {
+		throw new ConfigUnavailable(error instanceof Error ? error.message : 'config');
+	}
+	const routeIndex = parseRouteIndex(chunked(store, 'enf'));
+	if (!routeIndex) throw new ConfigUnavailable('route index');
+	return {
+		config,
+		deploymentId,
+		clearanceVersion,
+		publishableKey,
+		exclusions: compileExclusions(parseList(item(store, 'x'))),
+		routeIndex,
+	};
+}
 
+/** `<key>n` chunks under `<key>.0` … `<key>.n-1`, joined. A missing chunk is a torn publish. */
+function chunked(store: ConfigStore, key: string): string {
+	const chunks = Number(item(store, `${key}n`));
+	if (!Number.isInteger(chunks) || chunks < 1 || chunks > MAX_CHUNKS) throw new ConfigUnavailable(`${key}n`);
+	let value = '';
+	for (let i = 0; i < chunks; i++) {
+		const chunk = store.get(`${key}.${i}`);
+		if (chunk === null) throw new ConfigUnavailable(`${key}.${i}`);
+		value += chunk;
+	}
+	return value;
+}
+
+function parseList(raw: string | undefined): string[] {
+	if (!raw) return [];
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		return Array.isArray(parsed) ? parsed.filter((e): e is string => typeof e === 'string') : [];
+	} catch {
+		return [];
+	}
+}
+
+export function loadSecrets(store = new SecretStore(SECRET_STORE_NAME)): Secrets {
+	const read = async (key: string) => (await store.get(key))?.plaintext() ?? '';
 	let secretKey: Promise<string> | undefined;
 	let cookieSecret: Promise<string> | undefined;
-
 	return {
-		publishableKey,
-		originHost: optional(config, 'ORIGIN_HOST'),
-		chainSecret: optional(config, 'CHAIN_SECRET'),
-		cacheRules: parseCacheRules(optional(config, 'CACHE_RULES')),
-		protectedPaths: parseProtectedPaths(optional(config, 'PROTECTED_PATHS')),
-		blockResponseType: parseBlockType(optional(config, 'BLOCK_RESPONSE_TYPE')),
-		blockRedirectUrl: optional(config, 'BLOCK_REDIRECT_URL'),
-		blockStatusCode: parseBlockStatus(optional(config, 'BLOCK_STATUS_CODE')),
-		blockPageTitle: optional(config, 'BLOCK_PAGE_TITLE'),
-		blockResponseBody: optional(config, 'BLOCK_RESPONSE_BODY'),
-		getSecretKey: () => (secretKey ??= secret(secrets, 'SECRET_KEY')),
-		getCookieSecret: () => (cookieSecret ??= secret(secrets, 'COOKIE_SECRET_VALUE')),
+		secretKey: () => (secretKey ??= read('SECRET_KEY')),
+		cookieSecret: () => (cookieSecret ??= read('COOKIE_SECRET_VALUE')),
 	};
 }
