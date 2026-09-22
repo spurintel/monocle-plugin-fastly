@@ -48,6 +48,10 @@ function unknownHost(
 			new Response(null, { status: 301, headers: { Location: url.toString(), 'Cache-Control': 'no-store' } })
 		);
 	}
+	// A backstop. edge-core normalises the one reason a host we name used to arrive
+	// here, a port in the authority, so this should not be reachable; if it ever is,
+	// the request is for a host we protect and could not be assessed, and forwarding
+	// it would be the bypass rather than the safe option.
 	if (hosts.includes(url.hostname)) {
 		return Promise.resolve(
 			new Response(null, { status: 421, headers: { 'Cache-Control': 'no-store' } })
