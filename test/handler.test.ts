@@ -327,6 +327,28 @@ describe('WebSockets', () => {
 		expect(response.status).toBe(403);
 	});
 
+	// The handoff does not go through the origin leg, so it has to repeat its
+	// obligations: a chained service refuses anything without the signature, and the
+	// visitor's own cookies and headers must not travel with a connection we then lose
+	// sight of.
+	it('signs the chain and strips the visitor before handing off', async () => {
+		seedStores({ items: { CHAIN_SECRET: 'chain-secret', ORIGIN_HOST: 'internal.example' } });
+		const response = await run(
+			request('/public/live', {
+				cookie: '__Host-mcl_c=forged; cart=keep',
+				headers: { Upgrade: 'websocket', 'X-Monocle-Skip': 'spoofed', 'X-Real-IP': '1.2.3.4' },
+			})
+		);
+		expect(response.status).toBe(101);
+		const sent = handoffs[0]!.request;
+		expect(sent.headers.get('X-Monocle-Chain-Auth')).toMatch(/^\d+\.0x[0-9a-f]{64}$/);
+		expect(sent.headers.get('Cookie')).toBe('cart=keep');
+		expect(sent.headers.get('X-Monocle-Skip')).toBeNull();
+		expect(sent.headers.get('X-Real-IP')).toBeNull();
+		expect(sent.headers.get('X-Forwarded-For')).toBe(CLIENT_IP);
+		expect(sent.headers.get('host')).toBe('internal.example');
+	});
+
 	it('leaves an ordinary request alone', async () => {
 		backends.origin('GET', `${ORIGIN}/public/page`, 200, 'ok', HTML);
 		await run(request('/public/page'));

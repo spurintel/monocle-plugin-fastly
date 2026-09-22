@@ -20,7 +20,7 @@ import {
 } from './config';
 import { ORIGIN_BACKEND } from './constants';
 import { crawlerRanges } from './crawlers';
-import { fetchOrigin } from './origin';
+import { fetchOrigin, originHeaders } from './origin';
 import { fastlyPlatform, isLocal } from './platform';
 import { buildRuntime } from './runtime';
 
@@ -48,7 +48,7 @@ export async function handle(event: FetchEvent): Promise<Response> {
 		};
 		// Upgrades are answered before the pipeline, which would otherwise try to proxy
 		// one through a leg that cannot carry a socket.
-		const websocket = websocketAnswer(event.request, request, protection);
+		const websocket = await websocketAnswer(event.request, request, protection, origin, clientIp);
 		if (websocket) return websocket;
 		const platform = fastlyPlatform(clientIp, origin, protection.config.hosts);
 		const runtime = await buildRuntime(
@@ -92,7 +92,13 @@ export async function handle(event: FetchEvent): Promise<Response> {
  * for its lifetime, so there is no way to hold it to a verdict that can turn to block while
  * it is open, and the alternative of proxying it is the 502 this exists to remove.
  */
-function websocketAnswer(original: Request, request: Request, protection: Protection): Response | null {
+async function websocketAnswer(
+	original: Request,
+	request: Request,
+	protection: Protection,
+	settings: OriginSettings,
+	clientIp: string | null
+): Promise<Response | null> {
 	const upgrade = request.headers.get('Upgrade');
 	if (!upgrade || !upgrade.toLowerCase().includes('websocket')) return null;
 	const url = new URL(request.url);
@@ -105,7 +111,23 @@ function websocketAnswer(original: Request, request: Request, protection: Protec
 		return null;
 	}
 	if (enforced) return new Response(null, { status: 403, headers: { 'Cache-Control': 'no-store' } });
-	return createWebsocketHandoff(original, ORIGIN_BACKEND);
+	// The connection leaves our sight once Fastly has it, so everything the origin must
+	// not see goes first. `strippedRequest` removes our cookies and contract headers, as
+	// it does on the proxied path, and the rest is the same preparation the origin leg
+	// does, including the signature a chained service refuses requests without.
+	const stripped = strippedRequest(original);
+	const outbound = new URL(stripped.url);
+	if (settings.host) outbound.hostname = settings.host;
+	return createWebsocketHandoff(
+		new Request(
+			outbound.toString(),
+			{
+				method: stripped.method,
+				headers: await originHeaders(stripped.headers, settings, clientIp),
+			} as RequestInit
+		),
+		ORIGIN_BACKEND
+	);
 }
 
 /**

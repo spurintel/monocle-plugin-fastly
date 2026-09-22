@@ -20,16 +20,10 @@ export async function fetchOrigin(
 	// Rebuilt from parts: the headers become mutable, and the body streams through.
 	const outbound = new Request(url.toString(), {
 		method: request.method,
-		headers: request.headers,
+		headers: await originHeaders(request.headers, settings, clientIp),
 		body: request.method === 'GET' || request.method === 'HEAD' ? null : request.body,
 		duplex: 'half',
 	} as RequestInit);
-	if (settings.host) outbound.headers.set('host', settings.host);
-	stampClientIp(outbound.headers, clientIp, settings.clientIpHeader);
-	outbound.headers.delete(CHAIN_SECRET_HEADER);
-	outbound.headers.delete(CHAIN_AUTH_HEADER);
-	if (settings.chainSecret)
-		outbound.headers.set(CHAIN_AUTH_HEADER, await buildChainAuthHeader(settings.chainSecret));
 	// An enforced response was released against one visitor's verdict, so it must never
 	// be stored where the next visitor could be handed it. edge-core makes the response
 	// private downstream; the override would put it in the POP cache first. Only a
@@ -47,6 +41,29 @@ export async function fetchOrigin(
 		);
 		return new Response('Bad Gateway', { status: 502 });
 	}
+}
+
+/**
+ * The headers the origin must see, whichever way the request reaches it.
+ *
+ * Shared with the WebSocket handoff, which does not go through {@link fetchOrigin} but has
+ * exactly the same obligations: the origin is told the client address rather than trusting
+ * the viewer's, the viewer's own chaining headers are dropped, and a chained service still
+ * gets the signature it refuses requests without.
+ */
+export async function originHeaders(
+	source: Headers,
+	settings: OriginSettings,
+	clientIp: string | null
+): Promise<Headers> {
+	const headers = new Headers(source);
+	if (settings.host) headers.set('host', settings.host);
+	stampClientIp(headers, clientIp, settings.clientIpHeader);
+	headers.delete(CHAIN_SECRET_HEADER);
+	headers.delete(CHAIN_AUTH_HEADER);
+	if (settings.chainSecret)
+		headers.set(CHAIN_AUTH_HEADER, await buildChainAuthHeader(settings.chainSecret));
+	return headers;
 }
 
 /**
