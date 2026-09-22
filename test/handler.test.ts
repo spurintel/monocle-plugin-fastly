@@ -280,4 +280,16 @@ describe('the POP cache never holds an enforced response', () => {
 		await run(request('/public/page', { cookie, navigation: true }));
 		expect(open.calls[0]!.init.cacheOverride).toBeDefined();
 	});
+
+	// The fail-open path has no deployment to ask which paths are enforced, so it must
+	// not cache: a personalised page stored during an outage outlives it.
+	it('caches nothing while the deployment cannot be read', async () => {
+		setConfigStore('monocle_config', {
+			ORIGIN_HOST: 'example.com',
+			CACHE_RULES: JSON.stringify([{ prefix: '/', ttl: 600 }]),
+		});
+		const reply = backends.origin('GET', `${ORIGIN}/members/page`, 200, 'ok', HTML);
+		await run(request('/members/page', { navigation: true }));
+		expect(reply.calls[0]!.init.cacheOverride).toBeUndefined();
+	});
 });

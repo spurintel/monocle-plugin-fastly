@@ -30,12 +30,15 @@ export async function fetchOrigin(
 	outbound.headers.delete(CHAIN_AUTH_HEADER);
 	if (settings.chainSecret)
 		outbound.headers.set(CHAIN_AUTH_HEADER, await buildChainAuthHeader(settings.chainSecret));
-	// An enforced response was released against one visitor's verdict, so it must
-	// never be stored where the next visitor could be handed it. edge-core makes the
-	// response private downstream; the override would put it in the POP cache first.
-	const cacheOverride = settings.enforced?.(url.pathname)
-		? undefined
-		: cacheOverrideFor(url.pathname, settings.cacheRules);
+	// An enforced response was released against one visitor's verdict, so it must never
+	// be stored where the next visitor could be handed it. edge-core makes the response
+	// private downstream; the override would put it in the POP cache first. Only a
+	// positive "this path is not enforced" allows one, so the fail-open path, which has
+	// no deployment to ask, caches nothing rather than guessing.
+	const cacheOverride =
+		settings.enforced && !settings.enforced(url.pathname)
+			? cacheOverrideFor(url.pathname, settings.cacheRules)
+			: undefined;
 	try {
 		return await fetch(outbound, { backend: ORIGIN_BACKEND, ...(cacheOverride && { cacheOverride }) });
 	} catch (error) {
