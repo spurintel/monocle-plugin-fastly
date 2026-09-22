@@ -24,6 +24,12 @@ export interface OriginSettings {
 	cacheRules: CacheRule[];
 	/** One more header the client address is stamped into, for an origin that reads its own. */
 	clientIpHeader?: string;
+	/**
+	 * Whether a path is enforced, so the origin leg can keep an enforced response out
+	 * of the shared cache. Set once the deployment is loaded; absent means unknown,
+	 * which is the state a failed load leaves and where nothing is cached anyway.
+	 */
+	enforced?: (pathname: string) => boolean;
 }
 
 /** What the shared pipeline runs on. */
@@ -48,6 +54,15 @@ export class ConfigUnavailable extends Error {}
 const MAX_CHUNKS = 500;
 const CLEARANCE_VERSION = /^[a-f0-9]{64}$/;
 const HEADER_NAME = /^[A-Za-z0-9-]{1,64}$/;
+const HOSTNAME = /^[A-Za-z0-9.-]{1,253}$/;
+/** Names that must never be overwritten by the client-address stamp. */
+const RESERVED_IP_HEADERS = new Set([
+	'host',
+	'cookie',
+	'authorization',
+	'content-length',
+	'transfer-encoding',
+]);
 
 function item(store: ConfigStore, key: string): string | undefined {
 	const value = store.get(key);
@@ -56,11 +71,19 @@ function item(store: ConfigStore, key: string): string | undefined {
 
 export function loadOriginSettings(store = new ConfigStore(CONFIG_STORE_NAME)): OriginSettings {
 	const header = item(store, 'CLIENT_IP_HEADER');
+	const host = item(store, 'ORIGIN_HOST');
 	return {
-		host: item(store, 'ORIGIN_HOST'),
+		// A host with a space or a newline in it throws when it reaches a header,
+		// and the throw would escape the handler's own fallback.
+		host: host && HOSTNAME.test(host) ? host : undefined,
 		chainSecret: item(store, 'CHAIN_SECRET'),
 		cacheRules: parseCacheRules(item(store, 'CACHE_RULES')),
-		clientIpHeader: header && HEADER_NAME.test(header) ? header : undefined,
+		// A header name is one the dashboard chose, but naming `host`, `cookie` or
+		// `authorization` here would overwrite the request's own on the way out.
+		clientIpHeader:
+			header && HEADER_NAME.test(header) && !RESERVED_IP_HEADERS.has(header.toLowerCase())
+				? header
+				: undefined,
 	};
 }
 

@@ -20,17 +20,19 @@ export async function fetchOrigin(
 	// Rebuilt from parts: the headers become mutable, and the body streams through.
 	const outbound = new Request(url.toString(), {
 		method: request.method,
-		headers: request.headers,
+		headers: await originHeaders(request.headers, settings, clientIp),
 		body: request.method === 'GET' || request.method === 'HEAD' ? null : request.body,
 		duplex: 'half',
 	} as RequestInit);
-	if (settings.host) outbound.headers.set('host', settings.host);
-	stampClientIp(outbound.headers, clientIp, settings.clientIpHeader);
-	outbound.headers.delete(CHAIN_SECRET_HEADER);
-	outbound.headers.delete(CHAIN_AUTH_HEADER);
-	if (settings.chainSecret)
-		outbound.headers.set(CHAIN_AUTH_HEADER, await buildChainAuthHeader(settings.chainSecret));
-	const cacheOverride = cacheOverrideFor(url.pathname, settings.cacheRules);
+	// An enforced response was released against one visitor's verdict, so it must never
+	// be stored where the next visitor could be handed it. edge-core makes the response
+	// private downstream; the override would put it in the POP cache first. Only a
+	// positive "this path is not enforced" allows one, so the fail-open path, which has
+	// no deployment to ask, caches nothing rather than guessing.
+	const cacheOverride =
+		settings.enforced && !settings.enforced(url.pathname)
+			? cacheOverrideFor(url.pathname, settings.cacheRules)
+			: undefined;
 	try {
 		return await fetch(outbound, { backend: ORIGIN_BACKEND, ...(cacheOverride && { cacheOverride }) });
 	} catch (error) {
@@ -41,8 +43,46 @@ export async function fetchOrigin(
 	}
 }
 
+/**
+ * The headers the origin must see, whichever way the request reaches it.
+ *
+ * Shared with the WebSocket handoff, which does not go through {@link fetchOrigin} but has
+ * exactly the same obligations: the origin is told the client address rather than trusting
+ * the viewer's, the viewer's own chaining headers are dropped, and a chained service still
+ * gets the signature it refuses requests without.
+ */
+export async function originHeaders(
+	source: Headers,
+	settings: OriginSettings,
+	clientIp: string | null
+): Promise<Headers> {
+	const headers = new Headers(source);
+	if (settings.host) headers.set('host', settings.host);
+	stampClientIp(headers, clientIp, settings.clientIpHeader);
+	headers.delete(CHAIN_SECRET_HEADER);
+	headers.delete(CHAIN_AUTH_HEADER);
+	if (settings.chainSecret)
+		headers.set(CHAIN_AUTH_HEADER, await buildChainAuthHeader(settings.chainSecret));
+	return headers;
+}
+
+/**
+ * The other names an origin might be configured to trust. Deleted outright: Compute
+ * adds none of them, so any value present is the viewer's own and forging one is how
+ * an origin behind `real_ip_header` is told the wrong address.
+ */
+const FORGEABLE_CLIENT_IP_HEADERS = [
+	'X-Real-IP',
+	'True-Client-IP',
+	'CF-Connecting-IP',
+	'Forwarded',
+	'X-Client-IP',
+	'X-Cluster-Client-IP',
+];
+
 /** Overwrites, never appends: the inbound values are client-supplied. */
 export function stampClientIp(headers: Headers, clientIp: string | null, customHeader?: string): void {
+	for (const name of FORGEABLE_CLIENT_IP_HEADERS) headers.delete(name);
 	for (const name of ['X-Forwarded-For', 'Fastly-Client-IP', ...(customHeader ? [customHeader] : [])]) {
 		if (clientIp) headers.set(name, clientIp);
 		else headers.delete(name);

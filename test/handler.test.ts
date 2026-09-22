@@ -7,8 +7,9 @@ import { crawlerBackendName } from '../src/backends';
 import { handle } from '../src/handler';
 import { cachedValue, SimpleCache } from './doubles/cache';
 import { setConfigStore } from './doubles/config-store';
+import { handoffs, resetHandoffs } from './doubles/websocket';
 import { secretReads } from './doubles/secret-store';
-import { Backends, CLIENT_IP, cookiesFrom, fakeEvent, request, seedStores } from './helpers';
+import { Backends, CLIENT_IP, cookiesFrom, fakeEvent, KEY, request, seedStores } from './helpers';
 
 let backends: Backends;
 const ORIGIN = 'https://example.com';
@@ -219,4 +220,138 @@ describe('the breaker in the POP cache', () => {
 
 it('names a crawler backend from its feed host', () => {
 	expect(crawlerBackendName('developers.google.com')).toBe('crawler_developers_google_com');
+});
+
+describe('failures of ours reach the origin, never the visitor', () => {
+	// The sealer used to be built on first use, so a missing key threw from inside
+	// the pipeline, where a throw is a 503. Every enforced path and verify answered
+	// 503 for as long as the key stayed missing.
+	it.each([
+		['missing', undefined],
+		['too short', KEY.slice(0, 63)],
+		['not hex', 'z'.repeat(64)],
+	])('passes traffic marked when the cookie secret is %s', async (_label, value) => {
+		seedStores({ secrets: { COOKIE_SECRET_VALUE: value as string } });
+		const reply = backends.origin('GET', `${ORIGIN}/members/page`, 200, 'ok');
+		const response = await run(request('/members/page', { navigation: true }));
+		expect(response.status).toBe(200);
+		expect(reply.calls[0]!.request.headers.get('X-Monocle-Skip')).toBe('config');
+	});
+
+	it('answers verify without a 503 when the cookie secret is missing', async () => {
+		seedStores({ secrets: { COOKIE_SECRET_VALUE: undefined as unknown as string } });
+		backends.origin('POST', `${ORIGIN}/__mcl/verify`, 200, 'ok');
+		const response = await run(
+			request('/__mcl/verify', { method: 'POST', body: JSON.stringify({ captchaData: 'bundle' }) })
+		);
+		expect(response.status).not.toBe(503);
+	});
+});
+
+describe('a host we name, arriving with a port', () => {
+	// The pipeline declines a URL carrying a port, and the adapter used to treat that
+	// as "not our host" and forward it, so `Host: example.com:8443` walked straight
+	// past every enforced path.
+	// No origin reply is registered, so the backends double fails the test if the
+	// request is forwarded. The status differs by core version — a refusal before the
+	// port is normalised, the ordinary challenge after — and neither is a pass-through.
+	it('is never forwarded to the origin unassessed', async () => {
+		const response = await run(
+			new Request('https://example.com:8443/members/page', { headers: { 'Sec-Fetch-Mode': 'navigate' } })
+		);
+		expect(response.status).not.toBe(200);
+	});
+
+	it('still forwards a host the deployment does not name', async () => {
+		backends.origin('GET', 'https://other.example/page', 200, 'ok');
+		const response = await run(request('/page', { origin: 'https://other.example' }));
+		expect(response.status).toBe(200);
+	});
+});
+
+describe('the POP cache never holds an enforced response', () => {
+	it('drops the cache override on an enforced path and keeps it elsewhere', async () => {
+		seedStores({ items: { CACHE_RULES: JSON.stringify([{ prefix: '/', ttl: 600 }]) } });
+		const cookie = await mintClearance();
+		const enforced = backends.origin('GET', `${ORIGIN}/members/page`, 200, 'ok', HTML);
+		await run(request('/members/page', { cookie, navigation: true }));
+		expect(enforced.calls[0]!.init.cacheOverride).toBeUndefined();
+
+		const open = backends.origin('GET', `${ORIGIN}/public/page`, 200, 'ok', HTML);
+		await run(request('/public/page', { cookie, navigation: true }));
+		expect(open.calls[0]!.init.cacheOverride).toBeDefined();
+	});
+
+	// The fail-open path has no deployment to ask which paths are enforced, so it must
+	// not cache: a personalised page stored during an outage outlives it.
+	it('caches nothing while the deployment cannot be read', async () => {
+		setConfigStore('monocle_config', {
+			ORIGIN_HOST: 'example.com',
+			CACHE_RULES: JSON.stringify([{ prefix: '/', ttl: 600 }]),
+		});
+		const reply = backends.origin('GET', `${ORIGIN}/members/page`, 200, 'ok', HTML);
+		await run(request('/members/page', { navigation: true }));
+		expect(reply.calls[0]!.init.cacheOverride).toBeUndefined();
+	});
+});
+
+describe('WebSockets', () => {
+	const upgrade = (path: string) => request(path, { headers: { Upgrade: 'websocket' } });
+
+	beforeEach(() => resetHandoffs());
+
+	// The origin leg cannot carry a socket, so a proxied upgrade reached the origin and
+	// its 101 could not be relayed: every WebSocket on the domain answered 502.
+	it('hands an assessed path to Fastly to proxy, never through the origin leg', async () => {
+		const response = await run(upgrade('/public/live'));
+		expect(response.status).toBe(101);
+		expect(handoffs).toHaveLength(1);
+		expect(handoffs[0]!.backend).toBe('origin');
+	});
+
+	// A long-lived connection into a protected action must not open without clearance.
+	it('leaves an enforced path to the pipeline, which refuses it', async () => {
+		const response = await run(upgrade('/members/live'));
+		expect(response.status).toBe(403);
+		expect(handoffs).toHaveLength(0);
+	});
+
+	// With clearance the pipeline would proxy it, and the origin leg cannot carry a
+	// socket, so it used to die as a 502. It fails cleanly instead.
+	it('refuses an enforced upgrade even with clearance, rather than handing it off', async () => {
+		const cookie = await mintClearance();
+		const response = await run(
+			request('/members/live', { cookie, headers: { Upgrade: 'websocket' } })
+		);
+		expect(handoffs).toHaveLength(0);
+		expect(response.status).toBe(403);
+	});
+
+	// The handoff does not go through the origin leg, so it has to repeat its
+	// obligations: a chained service refuses anything without the signature, and the
+	// visitor's own cookies and headers must not travel with a connection we then lose
+	// sight of.
+	it('signs the chain and strips the visitor before handing off', async () => {
+		seedStores({ items: { CHAIN_SECRET: 'chain-secret', ORIGIN_HOST: 'internal.example' } });
+		const response = await run(
+			request('/public/live', {
+				cookie: '__Host-mcl_c=forged; cart=keep',
+				headers: { Upgrade: 'websocket', 'X-Monocle-Skip': 'spoofed', 'X-Real-IP': '1.2.3.4' },
+			})
+		);
+		expect(response.status).toBe(101);
+		const sent = handoffs[0]!.request;
+		expect(sent.headers.get('X-Monocle-Chain-Auth')).toMatch(/^\d+\.0x[0-9a-f]{64}$/);
+		expect(sent.headers.get('Cookie')).toBe('cart=keep');
+		expect(sent.headers.get('X-Monocle-Skip')).toBeNull();
+		expect(sent.headers.get('X-Real-IP')).toBeNull();
+		expect(sent.headers.get('X-Forwarded-For')).toBe(CLIENT_IP);
+		expect(sent.headers.get('host')).toBe('internal.example');
+	});
+
+	it('leaves an ordinary request alone', async () => {
+		backends.origin('GET', `${ORIGIN}/public/page`, 200, 'ok', HTML);
+		await run(request('/public/page'));
+		expect(handoffs).toHaveLength(0);
+	});
 });
