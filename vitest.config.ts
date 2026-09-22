@@ -14,6 +14,7 @@ export default defineConfig({
 			'fastly:cache-override': double('cache-override'),
 			'fastly:html-rewriter': double('html-rewriter'),
 			'fastly:env': double('env'),
+			'fastly:websocket': double('websocket'),
 		},
 	},
 	test: { include: ['test/**/*.test.ts'], environment: 'node' },

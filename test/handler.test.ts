@@ -7,6 +7,7 @@ import { crawlerBackendName } from '../src/backends';
 import { handle } from '../src/handler';
 import { cachedValue, SimpleCache } from './doubles/cache';
 import { setConfigStore } from './doubles/config-store';
+import { handoffs, resetHandoffs } from './doubles/websocket';
 import { secretReads } from './doubles/secret-store';
 import { Backends, CLIENT_IP, cookiesFrom, fakeEvent, KEY, request, seedStores } from './helpers';
 
@@ -291,5 +292,44 @@ describe('the POP cache never holds an enforced response', () => {
 		const reply = backends.origin('GET', `${ORIGIN}/members/page`, 200, 'ok', HTML);
 		await run(request('/members/page', { navigation: true }));
 		expect(reply.calls[0]!.init.cacheOverride).toBeUndefined();
+	});
+});
+
+describe('WebSockets', () => {
+	const upgrade = (path: string) => request(path, { headers: { Upgrade: 'websocket' } });
+
+	beforeEach(() => resetHandoffs());
+
+	// The origin leg cannot carry a socket, so a proxied upgrade reached the origin and
+	// its 101 could not be relayed: every WebSocket on the domain answered 502.
+	it('hands an assessed path to Fastly to proxy, never through the origin leg', async () => {
+		const response = await run(upgrade('/public/live'));
+		expect(response.status).toBe(101);
+		expect(handoffs).toHaveLength(1);
+		expect(handoffs[0]!.backend).toBe('origin');
+	});
+
+	// A long-lived connection into a protected action must not open without clearance.
+	it('leaves an enforced path to the pipeline, which refuses it', async () => {
+		const response = await run(upgrade('/members/live'));
+		expect(response.status).toBe(403);
+		expect(handoffs).toHaveLength(0);
+	});
+
+	// With clearance the pipeline would proxy it, and the origin leg cannot carry a
+	// socket, so it used to die as a 502. It fails cleanly instead.
+	it('refuses an enforced upgrade even with clearance, rather than handing it off', async () => {
+		const cookie = await mintClearance();
+		const response = await run(
+			request('/members/live', { cookie, headers: { Upgrade: 'websocket' } })
+		);
+		expect(handoffs).toHaveLength(0);
+		expect(response.status).toBe(403);
+	});
+
+	it('leaves an ordinary request alone', async () => {
+		backends.origin('GET', `${ORIGIN}/public/page`, 200, 'ok', HTML);
+		await run(request('/public/page'));
+		expect(handoffs).toHaveLength(0);
 	});
 });

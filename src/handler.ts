@@ -8,7 +8,17 @@ import {
 	strippedRequest,
 } from '@spur.us/monocle-edge-core';
 
-import { ConfigUnavailable, loadOriginSettings, loadProtection, loadSecrets, type OriginSettings } from './config';
+import { createWebsocketHandoff } from 'fastly:websocket';
+
+import {
+	ConfigUnavailable,
+	loadOriginSettings,
+	loadProtection,
+	loadSecrets,
+	type OriginSettings,
+	type Protection,
+} from './config';
+import { ORIGIN_BACKEND } from './constants';
 import { crawlerRanges } from './crawlers';
 import { fetchOrigin } from './origin';
 import { fastlyPlatform, isLocal } from './platform';
@@ -36,6 +46,10 @@ export async function handle(event: FetchEvent): Promise<Response> {
 				}
 			},
 		};
+		// Upgrades are answered before the pipeline, which would otherwise try to proxy
+		// one through a leg that cannot carry a socket.
+		const websocket = websocketAnswer(event.request, request, protection);
+		if (websocket) return websocket;
 		const platform = fastlyPlatform(clientIp, origin, protection.config.hosts);
 		const runtime = await buildRuntime(
 			protection,
@@ -62,6 +76,36 @@ export async function handle(event: FetchEvent): Promise<Response> {
 			return new Response('Bad Gateway', { status: 502, headers: { 'Cache-Control': 'no-store' } });
 		}
 	}
+}
+
+/**
+ * Answers a WebSocket upgrade, or null when this request is not one or is not for a host we
+ * protect. Both answers are the platform's to give, because both follow from what Compute
+ * can do rather than from any decision about the visitor.
+ *
+ * On a path we do not enforce, Fastly is asked to proxy the connection itself: the origin
+ * leg cannot carry a socket, so a proxied upgrade reaches the origin and its 101 arrives
+ * with nothing we can pass on. The service must have WebSocket passthrough enabled for the
+ * handoff to complete; without it the upgrade fails, which is what it already did.
+ *
+ * On a path we do enforce, it is refused. A connection handed to Fastly leaves our sight
+ * for its lifetime, so there is no way to hold it to a verdict that can turn to block while
+ * it is open, and the alternative of proxying it is the 502 this exists to remove.
+ */
+function websocketAnswer(original: Request, request: Request, protection: Protection): Response | null {
+	const upgrade = request.headers.get('Upgrade');
+	if (!upgrade || !upgrade.toLowerCase().includes('websocket')) return null;
+	const url = new URL(request.url);
+	if (!protection.config.hosts.includes(url.hostname)) return null;
+	let enforced: boolean;
+	try {
+		enforced = resolveIndexedRoute(canonicalizePath(url.pathname), protection.routeIndex).enforced;
+	} catch {
+		// An unusable path is the pipeline's to answer, not ours.
+		return null;
+	}
+	if (enforced) return new Response(null, { status: 403, headers: { 'Cache-Control': 'no-store' } });
+	return createWebsocketHandoff(original, ORIGIN_BACKEND);
 }
 
 /**
