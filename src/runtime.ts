@@ -9,15 +9,10 @@ import {
 import { ConfigUnavailable, type Protection, type Secrets } from './config';
 
 /**
- * The cookie sealer, built before the pipeline runs.
- *
- * It used to be built on first use, which kept the Secret Store off the hot path but put
- * the failure in the wrong place: `open` swallowed a bad key and read every cookie as
- * absent, while `seal` threw from inside the pipeline, where a throw is a 503 rather than
- * a pass-through. A store missing COOKIE_SECRET_VALUE therefore answered 503 to every
- * enforced path and to verify, for as long as it stayed missing. Reading it here costs one
- * Secret Store lookup per request and turns that outage into the marked pass-through every
- * other unusable config value already gets.
+ * The cookie sealer, built before the pipeline runs, so a missing or malformed key is a config
+ * failure and passes the request through marked. Built on first use instead, `open` would read
+ * every cookie as absent and `seal` would throw inside the pipeline, where a throw is a 503 on
+ * every enforced path and on verify. The cost is one Secret Store lookup per request.
  */
 async function buildSealer(cookieSecret: () => Promise<string>): Promise<Sealer> {
 	let key: string;
