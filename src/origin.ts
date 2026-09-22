@@ -30,7 +30,12 @@ export async function fetchOrigin(
 	outbound.headers.delete(CHAIN_AUTH_HEADER);
 	if (settings.chainSecret)
 		outbound.headers.set(CHAIN_AUTH_HEADER, await buildChainAuthHeader(settings.chainSecret));
-	const cacheOverride = cacheOverrideFor(url.pathname, settings.cacheRules);
+	// An enforced response was released against one visitor's verdict, so it must
+	// never be stored where the next visitor could be handed it. edge-core makes the
+	// response private downstream; the override would put it in the POP cache first.
+	const cacheOverride = settings.enforced?.(url.pathname)
+		? undefined
+		: cacheOverrideFor(url.pathname, settings.cacheRules);
 	try {
 		return await fetch(outbound, { backend: ORIGIN_BACKEND, ...(cacheOverride && { cacheOverride }) });
 	} catch (error) {
@@ -41,8 +46,23 @@ export async function fetchOrigin(
 	}
 }
 
+/**
+ * The other names an origin might be configured to trust. Deleted outright: Compute
+ * adds none of them, so any value present is the viewer's own and forging one is how
+ * an origin behind `real_ip_header` is told the wrong address.
+ */
+const FORGEABLE_CLIENT_IP_HEADERS = [
+	'X-Real-IP',
+	'True-Client-IP',
+	'CF-Connecting-IP',
+	'Forwarded',
+	'X-Client-IP',
+	'X-Cluster-Client-IP',
+];
+
 /** Overwrites, never appends: the inbound values are client-supplied. */
 export function stampClientIp(headers: Headers, clientIp: string | null, customHeader?: string): void {
+	for (const name of FORGEABLE_CLIENT_IP_HEADERS) headers.delete(name);
 	for (const name of ['X-Forwarded-For', 'Fastly-Client-IP', ...(customHeader ? [customHeader] : [])]) {
 		if (clientIp) headers.set(name, clientIp);
 		else headers.delete(name);

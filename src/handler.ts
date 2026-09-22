@@ -1,6 +1,12 @@
 /** Fastly adapter: load the deployment from the stores and hand the request to the shared pipeline. */
 
-import { handleRequest, strippedRequest } from '@spur.us/monocle-edge-core';
+import {
+	canonicalizePath,
+	handleRequest,
+	isMclPath,
+	resolveIndexedRoute,
+	strippedRequest,
+} from '@spur.us/monocle-edge-core';
 
 import { ConfigUnavailable, loadOriginSettings, loadProtection, loadSecrets, type OriginSettings } from './config';
 import { crawlerRanges } from './crawlers';
@@ -17,12 +23,25 @@ export async function handle(event: FetchEvent): Promise<Response> {
 	try {
 		origin = loadOriginSettings();
 		const protection = loadProtection();
-		const platform = fastlyPlatform(clientIp, origin);
+		// The origin leg needs to know an enforced path to keep its response out of
+		// the POP cache; only now is the deployment known.
+		origin = {
+			...origin,
+			enforced: (pathname) => {
+				try {
+					return resolveIndexedRoute(canonicalizePath(pathname), protection.routeIndex).enforced;
+				} catch {
+					// An unusable path is never cached either.
+					return true;
+				}
+			},
+		};
+		const platform = fastlyPlatform(clientIp, origin, protection.config.hosts);
 		const runtime = await buildRuntime(
 			protection,
 			loadSecrets(),
 			await crawlerRanges((task) => event.waitUntil(task), platform.fetch!),
-			/\/__mcl\//i.test(new URL(request.url).pathname)
+			needsSecretKey(request)
 		);
 		return await handleRequest(request, { runtime, platform });
 	} catch (error) {
@@ -30,9 +49,31 @@ export async function handle(event: FetchEvent): Promise<Response> {
 		console.error(
 			`monocle passing through unprotected (${reason}): ${error instanceof Error ? error.message : String(error)}`
 		);
-		const unprotected = strippedRequest(request);
-		unprotected.headers.set('X-Monocle-Skip', reason);
-		return fetchOrigin(unprotected, origin, clientIp);
+		try {
+			const unprotected = strippedRequest(request);
+			unprotected.headers.set('X-Monocle-Skip', reason);
+			return await fetchOrigin(unprotected, origin, clientIp);
+		} catch (fallbackError) {
+			// The last resort still answers: a rejected promise here would surface as
+			// the platform's own error page for every request.
+			console.error(
+				`monocle fallback failed: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`
+			);
+			return new Response('Bad Gateway', { status: 502, headers: { 'Cache-Control': 'no-store' } });
+		}
+	}
+}
+
+/**
+ * Whether this request can reach an endpoint, which is the only thing that reads the
+ * Secret Store's policy key. A path the canonicalizer rejects reaches no endpoint, and
+ * is left for the pipeline to answer 400 as the visitor's own doing.
+ */
+function needsSecretKey(request: Request): boolean {
+	try {
+		return isMclPath(canonicalizePath(new URL(request.url).pathname));
+	} catch {
+		return false;
 	}
 }
 
