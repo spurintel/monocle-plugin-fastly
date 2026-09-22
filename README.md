@@ -18,8 +18,9 @@ Visitor ──▶ Compute service
               │  secrets                 ◀── Secret Store
               │  breaker, crawler ranges ◀── POP cache (SimpleCache)
               ├─ /__mcl/*   verify ─▶ monocle_policy backend (Policy API)
-              ├─ excluded / unnamed host ─▶ origin backend, unassessed
+              ├─ excluded path ─▶ origin backend, unassessed
               └─ pipeline   refuse | block | serve (+ inject) ─▶ origin backend
+                                             └─ WebSocket upgrade ─▶ handed off to Fastly
 ```
 
 ## What the platform fixes
@@ -29,8 +30,16 @@ Visitor ──▶ Compute service
   `crawler_www_bing_com`), all static and created by the dashboard. No dynamic backends.
 - **Nothing survives in memory between requests.** The deployment is compiled per request from
   the Config Store; the breaker state and the crawler snapshot live in the POP cache.
-- **No scheduler.** Crawler ranges refresh lazily in `event.waitUntil` when the cached snapshot
-  is missing or expired, once per POP per lease; that request grants no exemption itself.
+- **No scheduler.** Crawler ranges refresh lazily in `event.waitUntil` once the cached snapshot
+  is an hour old, once per POP per lease. A snapshot is valid for a day, so it keeps exempting
+  while the refresh lands; only a missing or expired one grants nothing.
+- **Every attached domain is the site.** Fastly delivers only the domains attached to the
+  service, and they all reach the same origin, so a hostname the deployment does not name is
+  assessed and enforced like the ones it does.
+- **The origin leg cannot carry a socket.** A WebSocket upgrade the pipeline lets through (an
+  assessed path, or an enforced one with clearance) is handed to Fastly with
+  `createWebsocketHandoff`. The service needs WebSocket passthrough enabled for that, a paid
+  Fastly product the dashboard does not switch on; without it the upgrade fails.
 - **No AES-GCM and no `AbortSignal`.** Cookies use edge-core's HMAC-SHA256 sealer; the Policy
   deadline is the `monocle_policy` backend's first-byte timeout.
 
@@ -44,7 +53,7 @@ Resource link `monocle_config`. Values are at most 8,000 characters, 500 items p
 | `g` | generation the dashboard last wrote | dashboard |
 | `id` | deployment id, the cookie audience | dashboard |
 | `cv` | clearance version, 64 lowercase hex | dashboard |
-| `x` | JSON array of exclusions: `/path`, `/path/*` or `/path*` | dashboard |
+| `x` | JSON array of exclusions: `/path`, `/path/*` or `/path*`; unreadable counts as a torn publish | dashboard |
 | `cfgn`, `cfg.0` … `cfg.n-1` | the `DeploymentConfig` JSON (hosts, assess, allow IPs, injection, block page, session tracking, custom domain), in chunks | dashboard |
 | `enfn`, `enf.0` … `enf.n-1` | enforcement as edge-core's route index, `{v:1, p:{exact paths}, s:{subtree roots}, w:[wildcard patterns]}`, in chunks | dashboard |
 | `PUBLISHABLE_KEY` | Monocle publishable key | dashboard |

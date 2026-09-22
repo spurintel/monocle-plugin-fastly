@@ -24,12 +24,6 @@ export interface OriginSettings {
 	cacheRules: CacheRule[];
 	/** One more header the client address is stamped into, for an origin that reads its own. */
 	clientIpHeader?: string;
-	/**
-	 * Whether a path is enforced, so the origin leg can keep an enforced response out
-	 * of the shared cache. Set once the deployment is loaded; absent means unknown,
-	 * which is the state a failed load leaves and where nothing is cached anyway.
-	 */
-	enforced?: (pathname: string) => boolean;
 }
 
 /** What the shared pipeline runs on. */
@@ -43,7 +37,7 @@ export interface Protection {
 	routeIndex: RouteIndex;
 }
 
-/** Secret Store reads, each made once and only when a request needs it. */
+/** Secret Store reads, made only when a request needs them. */
 export interface Secrets {
 	secretKey(): Promise<string>;
 	cookieSecret(): Promise<string>;
@@ -115,7 +109,7 @@ export function loadProtection(store = new ConfigStore(CONFIG_STORE_NAME)): Prot
 		deploymentId,
 		clearanceVersion,
 		publishableKey,
-		exclusions: compileExclusions(parseList(item(store, 'x'))),
+		exclusions: compileExclusions(exclusionList(item(store, 'x'))),
 		routeIndex,
 	};
 }
@@ -133,22 +127,27 @@ function chunked(store: ConfigStore, key: string): string {
 	return value;
 }
 
-function parseList(raw: string | undefined): string[] {
+/**
+ * The paths the customer keeps Monocle off. Absent is none; anything unreadable is a broken
+ * store, since reading it as none would start protecting the paths they excluded.
+ */
+function exclusionList(raw: string | undefined): string[] {
 	if (!raw) return [];
+	let parsed: unknown;
 	try {
-		const parsed: unknown = JSON.parse(raw);
-		return Array.isArray(parsed) ? parsed.filter((e): e is string => typeof e === 'string') : [];
+		parsed = JSON.parse(raw);
 	} catch {
-		return [];
+		throw new ConfigUnavailable('exclusions');
 	}
+	if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === 'string'))
+		throw new ConfigUnavailable('exclusions');
+	return parsed;
 }
 
 export function loadSecrets(store = new SecretStore(SECRET_STORE_NAME)): Secrets {
 	const read = async (key: string) => (await store.get(key))?.plaintext() ?? '';
-	let secretKey: Promise<string> | undefined;
-	let cookieSecret: Promise<string> | undefined;
 	return {
-		secretKey: () => (secretKey ??= read('SECRET_KEY')),
-		cookieSecret: () => (cookieSecret ??= read('COOKIE_SECRET_VALUE')),
+		secretKey: () => read('SECRET_KEY'),
+		cookieSecret: () => read('COOKIE_SECRET_VALUE'),
 	};
 }

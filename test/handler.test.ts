@@ -48,7 +48,14 @@ describe('when the deployment cannot be read', () => {
 		expect(sent.headers.get('Cookie')).toBe('cart=7');
 	});
 
-	it.each<Record<string, string>>([{ cfgn: '2' }, { enfn: '2' }, { 'enf.0': '{"v":9}' }])('treats a torn publish %j as unreadable', async (items) => {
+	it.each<Record<string, string>>([
+		{ cfgn: '2' },
+		{ enfn: '2' },
+		{ 'enf.0': '{"v":9}' },
+		// Read as "nothing excluded", this would start protecting what the customer excluded.
+		{ x: '["/hooks/*"' },
+		{ x: '{"/hooks/*":1}' },
+	])('treats a torn publish %j as unreadable', async (items) => {
 		seedStores({ items });
 		const origin = backends.origin('GET', `${ORIGIN}/page`, 200, 'served');
 		await run(request('/page'));
@@ -107,12 +114,13 @@ describe('protection', () => {
 });
 
 describe('hosts and schemes', () => {
-	it('forwards a host the deployment does not name, unassessed', async () => {
-		const origin = backends.origin('GET', 'https://other.example/members/page', 200, 'served');
+	// Fastly delivers only the domains attached to this service, and they all reach the
+	// same origin. Forwarding an unnamed one unassessed, with the chain signature
+	// attached, was a route around every enforced path.
+	it('assesses a host the deployment does not name as the site', async () => {
 		const response = await run(request('/members/page', { navigation: true, origin: 'https://other.example' }));
-		expect(response.status).toBe(200);
-		expect(await response.text()).toBe('served');
-		expect(origin.calls[0]!.request.headers.get('X-Monocle-Skip')).toBeNull();
+		expect(response.status).toBe(503);
+		expect(await response.text()).toContain('/__mcl/verify');
 	});
 
 	it('sends plain HTTP to HTTPS rather than serving it', async () => {
@@ -182,6 +190,27 @@ describe('the crawler snapshot', () => {
 		backends.origin('GET', `${ORIGIN}/members/page`, 200, 'indexed');
 		const second = await run(request('/members/page', { navigation: true }), CRAWLER_IP);
 		expect(second.status).toBe(200);
+	});
+
+	// A snapshot is valid for a day. Cached for an hour, it vanished every hour and the
+	// request that noticed exempted nobody until the refresh landed.
+	it('keeps exempting from a snapshot due for refresh while the refresh runs', async () => {
+		const now = Math.floor(Date.now() / 1000);
+		SimpleCache.set(
+			'mcl:bots',
+			JSON.stringify({ v: 2, source: 'https://feeds.example', expiresAt: now + 7200, ranges: ['66.249.64.0/19'] }),
+			7200
+		);
+		for (const feed of CRAWLER_FEEDS) {
+			backends.on(crawlerBackendName(new URL(feed).hostname), () =>
+				Response.json({ prefixes: [{ ipv4Prefix: '66.249.64.0/19' }] })
+			);
+		}
+		backends.origin('GET', `${ORIGIN}/members/page`, 200, 'indexed');
+		const event = fakeEvent(request('/members/page', { navigation: true }), CRAWLER_IP);
+		expect((await handle(event.event)).status).toBe(200);
+		await event.settled();
+		expect(JSON.parse(cachedValue('mcl:bots')!).expiresAt).toBeGreaterThan(now + 86_000);
 	});
 
 	it('does not stampede: one refresh per lease', async () => {
@@ -262,10 +291,11 @@ describe('a host we name, arriving with a port', () => {
 		expect(response.status).not.toBe(200);
 	});
 
-	it('still forwards a host the deployment does not name', async () => {
-		backends.origin('GET', 'https://other.example/page', 200, 'ok');
-		const response = await run(request('/page', { origin: 'https://other.example' }));
-		expect(response.status).toBe(200);
+	it('assesses an unnamed host arriving with a port as the site too', async () => {
+		const response = await run(
+			new Request('https://other.example:8443/members/page', { headers: { 'Sec-Fetch-Mode': 'navigate' } })
+		);
+		expect(response.status).toBe(503);
 	});
 });
 
@@ -280,6 +310,18 @@ describe('the POP cache never holds an enforced response', () => {
 		const open = backends.origin('GET', `${ORIGIN}/public/page`, 200, 'ok', HTML);
 		await run(request('/public/page', { cookie, navigation: true }));
 		expect(open.calls[0]!.init.cacheOverride).toBeDefined();
+	});
+
+	// The pipeline says whether the route was enforced, and an excluded path never is,
+	// so the customer's cache rules apply to it even inside an enforced section.
+	it('keeps the cache override on a path excluded from an enforced section', async () => {
+		seedStores({
+			items: { CACHE_RULES: JSON.stringify([{ prefix: '/', ttl: 600 }]) },
+			exclusions: ['/members/public*'],
+		});
+		const reply = backends.origin('GET', `${ORIGIN}/members/public`, 200, 'ok', HTML);
+		await run(request('/members/public', { navigation: true }));
+		expect(reply.calls[0]!.init.cacheOverride).toBeDefined();
 	});
 
 	// The fail-open path has no deployment to ask which paths are enforced, so it must
@@ -316,15 +358,27 @@ describe('WebSockets', () => {
 		expect(handoffs).toHaveLength(0);
 	});
 
-	// With clearance the pipeline would proxy it, and the origin leg cannot carry a
-	// socket, so it used to die as a 502. It fails cleanly instead.
-	it('refuses an enforced upgrade even with clearance, rather than handing it off', async () => {
+	// Refusing every enforced upgrade refused visitors with clearance, allow-listed
+	// addresses and everyone during an outage, on the Upgrade header alone. The pipeline
+	// decides an upgrade as it decides anything else; only the transport is Fastly's.
+	it('hands off an enforced upgrade that carries clearance', async () => {
 		const cookie = await mintClearance();
 		const response = await run(
 			request('/members/live', { cookie, headers: { Upgrade: 'websocket' } })
 		);
-		expect(handoffs).toHaveLength(0);
-		expect(response.status).toBe(403);
+		expect(response.status).toBe(101);
+		expect(handoffs).toHaveLength(1);
+	});
+
+	it('hands off an enforced upgrade from an allow-listed address', async () => {
+		const response = await run(upgrade('/members/live'), '203.0.113.9');
+		expect(response.status).toBe(101);
+	});
+
+	it('hands off an excluded path inside an enforced section, untouched', async () => {
+		seedStores({ exclusions: ['/members/live'] });
+		const response = await run(upgrade('/members/live'));
+		expect(response.status).toBe(101);
 	});
 
 	// The handoff does not go through the origin leg, so it has to repeat its
