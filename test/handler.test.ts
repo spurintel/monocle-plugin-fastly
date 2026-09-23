@@ -1,7 +1,7 @@
 /** The handler end to end in Node, against the store, cache and rewriter doubles. */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CRAWLER_FEEDS, FAILURE_THRESHOLD } from '@spur.us/monocle-edge-core';
+import { CRAWLER_FEEDS, FAILURE_THRESHOLD, UNVERIFIED_PASS_SECONDS } from '@spur.us/monocle-edge-core';
 
 import { crawlerBackendName } from '../src/backends';
 import { handle } from '../src/handler';
@@ -70,7 +70,7 @@ describe('protection', () => {
 		expect(await challenge.text()).toContain('/__mcl/verify');
 		const state = await run(request('/__mcl/state'));
 		expect(state.status).toBe(200);
-		expect(await state.json()).toMatchObject({ hint: { verdict: null }, degraded: false, ip: CLIENT_IP });
+		expect(await state.json()).toMatchObject({ hint: { verdict: null }, ip: CLIENT_IP });
 	});
 
 	it('mints through the Policy backend, then serves the cleared page injected through the rewriter', async () => {
@@ -229,21 +229,28 @@ describe('the crawler snapshot', () => {
 	});
 });
 
-describe('the breaker in the POP cache', () => {
-	it('survives between requests: enforced traffic serves open once Policy has failed enough', async () => {
+describe('when Policy cannot answer', () => {
+	const verify = () =>
+		run(request('/__mcl/verify', { method: 'POST', body: JSON.stringify({ captchaData: 'bundle' }) }));
+
+	// Our failure never answers the visitor: they are passed, briefly, and asked again soon.
+	it('passes the visitor for ten minutes', async () => {
+		backends.on('monocle_policy', () => new Response('down', { status: 503 }));
+		const response = await verify();
+		expect(response.status).toBe(200);
+		expect(response.headers.getSetCookie().join()).toContain(`Max-Age=${UNVERIFIED_PASS_SECONDS}`);
+	});
+
+	// The breaker lives in the POP cache, so it survives between requests. It only decides
+	// whether verify asks Policy: no Policy reply is registered for the last verify.
+	it('stops asking a Policy that keeps failing, but never opens enforcement', async () => {
 		for (let i = 0; i < FAILURE_THRESHOLD; i++) {
 			backends.on('monocle_policy', () => new Response('down', { status: 503 }));
-			const response = await run(
-				request('/__mcl/verify', { method: 'POST', body: JSON.stringify({ captchaData: 'bundle' }) })
-			);
-			expect(response.status).toBe(503);
-			expect(response.headers.getSetCookie()).toEqual([]);
+			await verify();
 		}
 		expect(cachedValue('mcl:brk')).toContain('"status":"open"');
-		const origin = backends.origin('POST', `${ORIGIN}/api/cart/add`, 200, 'served open');
-		const response = await run(request('/api/cart/add', { method: 'POST', body: '{}' }));
-		expect(response.status).toBe(200);
-		expect(origin.calls[0]!.request.headers.get('X-Monocle-Degraded')).toBe('1');
+		expect((await verify()).status).toBe(200);
+		expect((await run(request('/api/cart/add', { method: 'POST', body: '{}' }))).status).toBe(403);
 	});
 });
 
