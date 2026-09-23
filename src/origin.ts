@@ -1,3 +1,4 @@
+import { CacheOverride } from 'fastly:cache-override';
 import { createWebsocketHandoff } from 'fastly:websocket';
 
 import { cacheOverrideFor } from './cacheRules';
@@ -12,8 +13,9 @@ import { CHAIN_AUTH_HEADER, ORIGIN_BACKEND } from './constants';
  * value is the visitor's to forge. A chained service gets a time-limited signature so it can
  * refuse anything that did not come through here.
  *
- * `route` is absent when the pipeline never resolved one, and nothing is cached then: a
- * response released against a verdict must not wait in the POP cache for the next visitor.
+ * A response released against a verdict must never wait in the POP cache for the next
+ * visitor, so an enforced route, or one the pipeline never resolved (`route` absent), passes
+ * the cache. Without an override the origin's own headers would decide.
  */
 export async function fetchOrigin(
 	request: Request,
@@ -38,7 +40,8 @@ export async function fetchOrigin(
 		body: request.method === 'GET' || request.method === 'HEAD' ? null : request.body,
 		duplex: 'half',
 	} as RequestInit);
-	const cacheOverride = route && !route.enforced ? cacheOverrideFor(url.pathname, settings.cacheRules) : undefined;
+	const cacheOverride =
+		route && !route.enforced ? cacheOverrideFor(url.pathname, settings.cacheRules) : new CacheOverride('pass');
 	try {
 		return await fetch(outbound, { backend: ORIGIN_BACKEND, ...(cacheOverride && { cacheOverride }) });
 	} catch (error) {

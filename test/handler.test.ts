@@ -1,7 +1,7 @@
 /** The handler end to end in Node, against the store, cache and rewriter doubles. */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CRAWLER_FEEDS, FAILURE_THRESHOLD, UNVERIFIED_PASS_SECONDS } from '@spur.us/monocle-edge-core';
+import { ALLOW_TTL_SECONDS, CRAWLER_FEEDS, FAILURE_THRESHOLD, UNVERIFIED_PASS_SECONDS } from '@spur.us/monocle-edge-core';
 
 import { crawlerBackendName } from '../src/backends';
 import { handle } from '../src/handler';
@@ -104,13 +104,27 @@ describe('protection', () => {
 		expect((await run(request('/members/page', { navigation: true }))).status).toBe(503);
 	});
 
-	it('reads the Policy key only for the endpoints', async () => {
+	it('reads the Policy key only when verify asks Policy', async () => {
 		backends.origin('GET', `${ORIGIN}/page`, 200, 'served');
 		await run(request('/page'));
 		expect(secretReads.get('SECRET_KEY')).toBeUndefined();
 		await mintClearance();
 		expect(secretReads.get('SECRET_KEY')).toBe(1);
 	});
+
+	// How a request spells verify must never decide whether Policy is asked: an empty key is
+	// our outage, which passes the visitor.
+	it.each(['/__mcl/v%65rify', '/%5f_mcl/verify', '/__MCL/verify'])(
+		'asks Policy for verify spelled %s',
+		async (path) => {
+			backends.policy(true);
+			const response = await run(request(path, { method: 'POST', body: JSON.stringify({ captchaData: 'bundle' }) }));
+			expect(response.status).toBe(200);
+			// Policy's own allow, not the unverified pass an empty key would have minted.
+			expect(response.headers.getSetCookie().join()).toContain(`Max-Age=${ALLOW_TTL_SECONDS}`);
+			expect(secretReads.get('SECRET_KEY')).toBe(1);
+		}
+	);
 });
 
 describe('hosts and schemes', () => {
@@ -307,16 +321,16 @@ describe('a host we name, arriving with a port', () => {
 });
 
 describe('the POP cache never holds an enforced response', () => {
-	it('drops the cache override on an enforced path and keeps it elsewhere', async () => {
+	it('passes the cache on an enforced path and keeps the cloned rule elsewhere', async () => {
 		seedStores({ items: { CACHE_RULES: JSON.stringify([{ prefix: '/', ttl: 600 }]) } });
 		const cookie = await mintClearance();
 		const enforced = backends.origin('GET', `${ORIGIN}/members/page`, 200, 'ok', HTML);
 		await run(request('/members/page', { cookie, navigation: true }));
-		expect(enforced.calls[0]!.init.cacheOverride).toBeUndefined();
+		expect(enforced.calls[0]!.init.cacheOverride).toMatchObject({ mode: 'pass' });
 
 		const open = backends.origin('GET', `${ORIGIN}/public/page`, 200, 'ok', HTML);
 		await run(request('/public/page', { cookie, navigation: true }));
-		expect(open.calls[0]!.init.cacheOverride).toBeDefined();
+		expect(open.calls[0]!.init.cacheOverride).toMatchObject({ mode: 'override', init: { ttl: 600 } });
 	});
 
 	// The pipeline says whether the route was enforced, and an excluded path never is,
@@ -340,7 +354,7 @@ describe('the POP cache never holds an enforced response', () => {
 		});
 		const reply = backends.origin('GET', `${ORIGIN}/members/page`, 200, 'ok', HTML);
 		await run(request('/members/page', { navigation: true }));
-		expect(reply.calls[0]!.init.cacheOverride).toBeUndefined();
+		expect(reply.calls[0]!.init.cacheOverride).toMatchObject({ mode: 'pass' });
 	});
 });
 

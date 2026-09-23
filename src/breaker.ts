@@ -16,6 +16,8 @@ export function cacheBreakerStore(): BreakerStore {
 			}
 		},
 		async save(state) {
+			// Deprecated in favour of getOrSet, which only fills an empty key; a breaker
+			// overwrites its state, which only set does.
 			SimpleCache.set(BREAKER_CACHE_KEY, JSON.stringify(state), BREAKER_CACHE_SECONDS);
 		},
 	};
