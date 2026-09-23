@@ -48,6 +48,21 @@ describe('when the deployment cannot be read', () => {
 		expect(sent.headers.get('Cookie')).toBe('cart=7');
 	});
 
+	// A chained service refuses anything unsigned, so a pass-through without the signature
+	// would turn our outage into a 403 for every visitor.
+	it('still signs for a chained service when it forwards unprotected', async () => {
+		setConfigStore('monocle_config', {
+			ORIGIN_HOST: 'monocle-example.global.ssl.fastly.net',
+			CHAIN_SECRET: 'chainsecret',
+			PUBLISHABLE_KEY: 'pk',
+		});
+		const origin = backends.origin('GET', 'https://monocle-example.global.ssl.fastly.net/page', 200, 'served');
+		await run(request('/page'));
+		const sent = origin.calls[0]!.request;
+		expect(sent.headers.get('X-Monocle-Skip')).toBe('config');
+		expect(sent.headers.get('X-Monocle-Chain-Auth')).toMatch(/^\d{10}\.0x[0-9a-f]{64}$/);
+	});
+
 	it.each<Record<string, string>>([
 		{ cfgn: '2' },
 		{ enfn: '2' },
@@ -299,17 +314,16 @@ describe('failures of ours reach the origin, never the visitor', () => {
 });
 
 describe('a host we name, arriving with a port', () => {
-	// The pipeline declines a URL carrying a port, and the adapter used to treat that
-	// as "not our host" and forward it, so `Host: example.com:8443` walked straight
-	// past every enforced path.
-	// No origin reply is registered, so the backends double fails the test if the
-	// request is forwarded. The status differs by core version — a refusal before the
-	// port is normalised, the ordinary challenge after — and neither is a pass-through.
-	it('is never forwarded to the origin unassessed', async () => {
+	// The adapter used to treat a URL carrying a port as "not our host" and forward it, so
+	// `Host: example.com:8443` walked straight past every enforced path. Core drops the port,
+	// so this is the ordinary challenge. No origin reply is registered, so the backends double
+	// fails the test if the request is forwarded.
+	it('is challenged like the host it names', async () => {
 		const response = await run(
 			new Request('https://example.com:8443/members/page', { headers: { 'Sec-Fetch-Mode': 'navigate' } })
 		);
-		expect(response.status).not.toBe(200);
+		expect(response.status).toBe(503);
+		expect(await response.text()).toContain('/__mcl/verify');
 	});
 
 	it('assesses an unnamed host arriving with a port as the site too', async () => {
