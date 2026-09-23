@@ -33,17 +33,20 @@ async function buildSealer(cookieSecret: () => Promise<string>): Promise<Sealer>
  * Policy key is read by verify itself, only when it asks Policy, so every other request leaves
  * the Secret Store's key alone.
  */
-export function buildRuntime(protection: Protection, secrets: Secrets, crawlerRanges: CidrSet): Promise<Runtime> {
-	return (async () =>
-		assembleRuntime({
-			config: protection.config,
-			deploymentId: protection.deploymentId,
-			clearanceVersion: protection.clearanceVersion,
-			publishableKey: protection.publishableKey,
-			secretKey: secrets.secretKey,
-			sealer: await buildSealer(secrets.cookieSecret),
-			crawlerRanges,
-			exclusions: protection.exclusions,
-			routeIndex: protection.routeIndex,
-		}))();
+export async function buildRuntime(
+	protection: Protection,
+	secrets: Secrets,
+	crawlerRanges: CidrSet
+): Promise<Runtime> {
+	return assembleRuntime({
+		config: protection.config,
+		deploymentId: protection.deploymentId,
+		clearanceVersion: protection.clearanceVersion,
+		publishableKey: protection.publishableKey,
+		secretKey: secrets.secretKey,
+		sealer: await buildSealer(secrets.cookieSecret),
+		crawlerRanges,
+		exclusions: protection.exclusions,
+		routeIndex: protection.routeIndex,
+	});
 }
