@@ -40,11 +40,11 @@ export function seedStores(
 	});
 	setSecretStore('monocle_secrets', { SECRET_KEY: 'sk_test', COOKIE_SECRET_VALUE: KEY, ...options.secrets });
 	resetSimpleCache();
-	// A current, empty snapshot: no exemptions, and no refresh scheduled behind the test.
+	// A freshly fetched, empty snapshot: no exemptions, and no refresh scheduled behind the test.
 	SimpleCache.set(
 		'mcl:bots',
-		JSON.stringify({ v: 2, source: 'https://feeds.example', expiresAt: Math.floor(Date.now() / 1000) + 3600, ranges: [] }),
-		3600
+		JSON.stringify({ v: 2, source: 'https://feeds.example', expiresAt: Math.floor(Date.now() / 1000) + 86_400, ranges: [] }),
+		86_400
 	);
 }
 

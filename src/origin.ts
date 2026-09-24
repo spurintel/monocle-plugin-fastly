@@ -1,7 +1,9 @@
+import { createWebsocketHandoff } from 'fastly:websocket';
+
 import { cacheOverrideFor } from './cacheRules';
 import { buildChainAuthHeader } from './chainAuth';
 import type { OriginSettings } from './config';
-import { CHAIN_AUTH_HEADER, CHAIN_SECRET_HEADER, ORIGIN_BACKEND } from './constants';
+import { CHAIN_AUTH_HEADER, ORIGIN_BACKEND } from './constants';
 
 /**
  * Proxies to the customer's origin. The inbound Host names this service, so a host-routing
@@ -9,30 +11,34 @@ import { CHAIN_AUTH_HEADER, CHAIN_SECRET_HEADER, ORIGIN_BACKEND } from './consta
  * asserted, never forwarded: Compute adds no client-IP headers of its own, and an inbound
  * value is the visitor's to forge. A chained service gets a time-limited signature so it can
  * refuse anything that did not come through here.
+ *
+ * `route` is absent when the pipeline never resolved one, and nothing is cached then: a
+ * response released against a verdict must not wait in the POP cache for the next visitor.
  */
 export async function fetchOrigin(
 	request: Request,
 	settings: OriginSettings,
-	clientIp: string | null
+	clientIp: string | null,
+	route?: { enforced: boolean }
 ): Promise<Response> {
 	const url = new URL(request.url);
 	if (settings.host) url.hostname = settings.host;
+	const headers = await originHeaders(request.headers, settings, clientIp);
+	// This leg cannot carry a socket, so an upgrade the pipeline let through is handed to
+	// Fastly to proxy. That needs WebSocket passthrough enabled on the service.
+	if ((request.headers.get('Upgrade') ?? '').toLowerCase().includes('websocket'))
+		return createWebsocketHandoff(
+			new Request(url.toString(), { method: request.method, headers } as RequestInit),
+			ORIGIN_BACKEND
+		);
 	// Rebuilt from parts: the headers become mutable, and the body streams through.
 	const outbound = new Request(url.toString(), {
 		method: request.method,
-		headers: await originHeaders(request.headers, settings, clientIp),
+		headers,
 		body: request.method === 'GET' || request.method === 'HEAD' ? null : request.body,
 		duplex: 'half',
 	} as RequestInit);
-	// An enforced response was released against one visitor's verdict, so it must never
-	// be stored where the next visitor could be handed it. edge-core makes the response
-	// private downstream; the override would put it in the POP cache first. Only a
-	// positive "this path is not enforced" allows one, so the fail-open path, which has
-	// no deployment to ask, caches nothing rather than guessing.
-	const cacheOverride =
-		settings.enforced && !settings.enforced(url.pathname)
-			? cacheOverrideFor(url.pathname, settings.cacheRules)
-			: undefined;
+	const cacheOverride = route && !route.enforced ? cacheOverrideFor(url.pathname, settings.cacheRules) : undefined;
 	try {
 		return await fetch(outbound, { backend: ORIGIN_BACKEND, ...(cacheOverride && { cacheOverride }) });
 	} catch (error) {
@@ -44,25 +50,15 @@ export async function fetchOrigin(
 }
 
 /**
- * The headers the origin must see, whichever way the request reaches it.
- *
- * Shared with the WebSocket handoff, which does not go through {@link fetchOrigin} but has
- * exactly the same obligations: the origin is told the client address rather than trusting
- * the viewer's, the viewer's own chaining headers are dropped, and a chained service still
- * gets the signature it refuses requests without.
+ * The headers the origin must see: the client address stamped rather than trusted, and the
+ * chain signature when chaining. The pipeline has already removed every `X-Monocle-*` the
+ * viewer sent, so a forged signature never reaches this far.
  */
-export async function originHeaders(
-	source: Headers,
-	settings: OriginSettings,
-	clientIp: string | null
-): Promise<Headers> {
+async function originHeaders(source: Headers, settings: OriginSettings, clientIp: string | null): Promise<Headers> {
 	const headers = new Headers(source);
 	if (settings.host) headers.set('host', settings.host);
 	stampClientIp(headers, clientIp, settings.clientIpHeader);
-	headers.delete(CHAIN_SECRET_HEADER);
-	headers.delete(CHAIN_AUTH_HEADER);
-	if (settings.chainSecret)
-		headers.set(CHAIN_AUTH_HEADER, await buildChainAuthHeader(settings.chainSecret));
+	if (settings.chainSecret) headers.set(CHAIN_AUTH_HEADER, await buildChainAuthHeader(settings.chainSecret));
 	return headers;
 }
 
@@ -81,7 +77,7 @@ const FORGEABLE_CLIENT_IP_HEADERS = [
 ];
 
 /** Overwrites, never appends: the inbound values are client-supplied. */
-export function stampClientIp(headers: Headers, clientIp: string | null, customHeader?: string): void {
+function stampClientIp(headers: Headers, clientIp: string | null, customHeader?: string): void {
 	for (const name of FORGEABLE_CLIENT_IP_HEADERS) headers.delete(name);
 	for (const name of ['X-Forwarded-For', 'Fastly-Client-IP', ...(customHeader ? [customHeader] : [])]) {
 		if (clientIp) headers.set(name, clientIp);
