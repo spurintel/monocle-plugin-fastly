@@ -1,6 +1,6 @@
 /** Fastly adapter: load the deployment from the stores and hand the request to the shared pipeline. */
 
-import { canonicalizePath, handleRequest, isMclPath, passThroughUnprotected } from '@spur.us/monocle-edge-core';
+import { handleRequest, passThroughUnprotected } from '@spur.us/monocle-edge-core';
 
 import { ConfigUnavailable, loadOriginSettings, loadProtection, loadSecrets, type OriginSettings } from './config';
 import { crawlerRanges } from './crawlers';
@@ -20,8 +20,7 @@ export async function handle(event: FetchEvent): Promise<Response> {
 		const runtime = await buildRuntime(
 			protection,
 			loadSecrets(),
-			await crawlerRanges((task) => event.waitUntil(task), platform.fetch!),
-			needsSecretKey(request)
+			await crawlerRanges((task) => event.waitUntil(task), platform.fetch!)
 		);
 		return await handleRequest(request, { runtime, platform });
 	} catch (error) {
@@ -39,19 +38,6 @@ export async function handle(event: FetchEvent): Promise<Response> {
 			);
 			return new Response('Bad Gateway', { status: 502, headers: { 'Cache-Control': 'no-store' } });
 		}
-	}
-}
-
-/**
- * Whether this request can reach an endpoint, which is the only thing that reads the
- * Secret Store's policy key. A path the canonicalizer rejects reaches no endpoint, and
- * is left for the pipeline to answer 400 as the visitor's own doing.
- */
-function needsSecretKey(request: Request): boolean {
-	try {
-		return isMclPath(canonicalizePath(new URL(request.url).pathname));
-	} catch {
-		return false;
 	}
 }
 
